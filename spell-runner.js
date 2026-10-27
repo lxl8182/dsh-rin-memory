@@ -165,12 +165,12 @@ export class SpellRunner {
         await this.followupOf(agent)(spellMessage(results.map(result => renderFeedback(result.cast, result)).join('\n\n')))
       } else if (results.length) {
         try { await this.onAbandoned(agent, results) } catch (error) {
-          this.logger.warn?.(`[dsh-companion-memory] 咒语结果补投失败：${error?.message ?? error}`)
+          this.logger.warn?.(`[dsh-rin-memory] 咒语结果补投失败：${error?.message ?? error}`)
         }
       }
       return results
     }).finally(() => this.jobs.delete(controller))
-    this.tail = job.catch(error => this.logger.warn?.(`[dsh-companion-memory] 咒语回填失败：${error.message}`))
+    this.tail = job.catch(error => this.logger.warn?.(`[dsh-rin-memory] 咒语回填失败：${error.message}`))
     return job
   }
 

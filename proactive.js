@@ -29,7 +29,7 @@ export class ProactiveRuntime {
       })
     } catch (error) {
       this.retryAt = Date.now() + 60000
-      this.runtime.logger.warn?.('[dsh-companion-memory] 主动状态同步暂缓：' + (error.code ?? error.message))
+      this.runtime.logger.warn?.('[dsh-rin-memory] 主动状态同步暂缓：' + (error.code ?? error.message))
     }
   }
 
@@ -41,7 +41,7 @@ export class ProactiveRuntime {
     if (!run || run.turn !== event.data?.turn) return
     const finish = async () => {
       try { await this.finish(session, event, run) }
-      catch (error) { this.runtime.logger.warn?.('[dsh-companion-memory] 主动输出待恢复：' + error.message) }
+      catch (error) { this.runtime.logger.warn?.('[dsh-rin-memory] 主动输出待恢复：' + error.message) }
       finally { if (this.active.get(session.id) === run) this.active.delete(session.id) }
     }
     this.tail = this.tail.then(finish)
@@ -113,7 +113,7 @@ export class ProactiveRuntime {
       }
     } catch (error) {
       this.retryAt = Date.now() + 60000
-      runtime.logger.warn?.('[dsh-companion-memory] 主动交流暂缓，普通聊天继续：' + (error.code ?? error.message))
+      runtime.logger.warn?.('[dsh-rin-memory] 主动交流暂缓，普通聊天继续：' + (error.code ?? error.message))
     }
   }
 

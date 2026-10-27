@@ -232,7 +232,7 @@ test('G20: state / episode / growth fragments really land in the final message l
   }))
   assert.ok(requests.includes('/v1/context'))
   const injected = decision.messages.at(-1)
-  assert.equal(injected.source.kind, 'companion-memory', 'the material is a marked source, not a user message')
+  assert.equal(injected.source.kind, 'rin-memory', 'the material is a marked source, not a user message')
   const text = injected.content[0].text
   // 三层都必须真的在这条消息里 —— 不是只渲染出来又被丢掉。
   assert.match(text, /\[相处与成长\]/, 'growth reaches the model')

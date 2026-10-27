@@ -87,12 +87,12 @@ export class TaskStore {
       // A damaged ledger is not silently replaced by a blank one: report it so
       // the operator can look, then fail closed and keep chating working.
       this.openError = `任务台账无法解析：${error.message}`
-      this.logger.warn?.(`[dsh-companion-memory] ${this.openError}`)
+      this.logger.warn?.(`[dsh-rin-memory] ${this.openError}`)
       return
     }
     if (raw?.version !== 1 || typeof raw.tasks !== 'object' || raw.tasks === null || Array.isArray(raw.tasks)) {
       this.openError = '任务台账格式错误'
-      this.logger.warn?.('[dsh-companion-memory] 任务台账格式错误，按空台账继续')
+      this.logger.warn?.('[dsh-rin-memory] 任务台账格式错误，按空台账继续')
       return
     }
     this.state = { version: 1, tasks: raw.tasks }

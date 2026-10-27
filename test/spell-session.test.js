@@ -56,7 +56,7 @@ test('a desktop QQ preset executes and follows up with no bridge or QQ binding',
   assert.equal(f.runtime.spellScopes.size, 1)
   const assemble = f.hooks.get(main).get('system-prompt/assemble')[0]
   const shaped = await assemble({}, {}, async () => ({ sections: [], tools: [{ name: 'pwsh' }] }))
-  assert.deepEqual(shaped.sections.map(s => s.name), ['deployment:persona-prefix', 'companion-memory:magic'])
+  assert.deepEqual(shaped.sections.map(s => s.name), ['deployment:persona-prefix', 'rin-memory:magic'])
   assert.equal(shaped.sections[0].text, '本地完整人格')
   assert.deepEqual(shaped.tools, [])
   f.emit(main, '<执行>echo hi</执行>', 1)

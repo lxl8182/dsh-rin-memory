@@ -1,7 +1,7 @@
 # 咒语执行链开发计划（脱离 bridge · 标准 agent · followup 回填 · 模板库）
 
 > 执行方案 A：标准模式 agent（无 preset，全套工具）。实际进度统一见 roadmap §2.5。
-> 目标：插件 `dsh-companion-memory` 0.2.3；执行/回填完全归插件，QQ 侧标签剥离归 bridge。2026-10-26 用户明确：网页 QQ 预设无 bridge 也能执行，网页可以显示标签；bridge 仅做最小剥离调整，不承担执行或等待回填。
+> 目标：插件 `dsh-rin-memory` 0.2.3；执行/回填完全归插件，QQ 侧标签剥离归 bridge。2026-10-26 用户明确：网页 QQ 预设无 bridge 也能执行，网页可以显示标签；bridge 仅做最小剥离调整，不承担执行或等待回填。
 
 ---
 

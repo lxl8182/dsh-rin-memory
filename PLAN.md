@@ -1,8 +1,8 @@
 # DSH 记忆插件开发计划：统一记忆、精简 QQ 主会话与缓存优化
 
-确定日期：2026-10-25。开发目录：`F:\game\projectNEKO\dsh-companion-memory`。
+确定日期：2026-10-25。开发目录：`F:\game\projectNEKO\dsh-rin-memory`。
 
-本文是下一位 agent 的直接执行入口。用户已确定：统一人格、记忆读取、对话保存、更正删除和故障恢复都做在本插件，与已经正常工作的 QQ bridge 共存。日常回复和工具调用由 DSH 完成，companion-memory 是人格和长期记忆的唯一权威。
+本文是下一位 agent 的直接执行入口。用户已确定：统一人格、记忆读取、对话保存、更正删除和故障恢复都做在本插件，与已经正常工作的 QQ bridge 共存。日常回复和工具调用由 DSH 完成，rin-memory 是人格和长期记忆的唯一权威。
 
 **当前执行入口是 [SPELL-PLAN.md](SPELL-PLAN.md)**：执行与回填归本插件，网页 QQ 预设脱离 bridge 运行；QQ 标签剥离留在 bridge。§9 的“四个主工具”是早期方案，现由“人格 + 魔法、0 tools”替代；既有记忆与 companion_task 合同继续保留。所有工作包状态只更新统一台账 §2.5。
 
@@ -25,12 +25,12 @@
 
 | 内容 | 位置与约定 |
 |---|---|
-| 本插件 | `F:\game\projectNEKO\dsh-companion-memory`，包名 `@local/dsh-companion-memory@0.2.1` |
+| 本插件 | `F:\game\projectNEKO\dsh-rin-memory`，包名 `@local/dsh-rin-memory@0.2.1` |
 | DSH 桌面应用 | `E:\dsh\desktop\DeepSeek Harness.exe`，`0.2.1-rc.3` |
 | DSH 源码参考 | `E:\dsh\deepseek-harness`，以升级后桌面实际模块为接口依据 |
 | QQ bridge | `E:\dsh\plugins\dsh-qq-bridge`，本地兼容包 `1.0.6-neko.2` |
 | 桌面 profile | `C:\Users\22712\.dsh\profiles\desktop`，安装更新走 DSH 插件管理 |
-| 记忆服务源码 | `F:\game\projectNEKO\companion-memory` |
+| 记忆服务源码 | `F:\game\projectNEKO\rin-memory` |
 | 服务与管理台 | `http://127.0.0.1:48931`，聊天页 `/designs/tidebell/index-watercolor.html#chat` |
 | 运行配置 | `F:\game\projectNEKO\companion-runtime\config\stack.toml` |
 | 当前接入身份 | `characterId=companion`、`subject=private`、`clientId=dsh-desktop`、`pluginId=dsh_memory` |
@@ -49,7 +49,7 @@
 - `cordis.patch.yml`、`package.json`、`locale/`：原生插件包与配置入口。
 - `test/memory.test.js`：已有行为检查，在此基础上补关键缺口。
 - bridge 的 `src/plugin.ts`、`src/handlers/agent.ts`、`src/router.ts` 及相关收发模块：实际会话绑定、最终文字和发送边界。
-- [companion-memory/AGENTS.md](https://github.com/lxl8182/rin-memory/blob/main/AGENTS.md) 与上述 HTTP 合同：服务权限、更正删除、上下文失效与回执语义。
+- [rin-memory/AGENTS.md](https://github.com/lxl8182/rin-memory/blob/main/AGENTS.md) 与上述 HTTP 合同：服务权限、更正删除、上下文失效与回执语义。
 
 **3. 两个插件怎样共存**
 
@@ -58,7 +58,7 @@
 | QQ bridge | QQ 登录、主人身份校验、消息收发、已有控制指令、QQ 到 DSH 的会话映射 |
 | 本记忆插件 | 绑定目标会话、读取人格和记忆、保存轮次、记忆更正/遗忘、补交、清理和接入状态 |
 | DSH | 模型调用、原生会话、已安装工具、工具权限和执行过程 |
-| companion-memory | 唯一人格卡、发布版本、事实提炼、召回、演化、更正和删除规则 |
+| rin-memory | 唯一人格卡、发布版本、事实提炼、召回、演化、更正和删除规则 |
 
 优先使用 DSH 原生生命周期和已有服务扩展。若 bridge 缺少稳定来源标识、最终对外文字、发送结果或替换会话的接入点，只补必要事件/接口；具体记忆逻辑保留在本插件。bridge 未安装本插件时继续独立工作，不新增第二条 QQ 连接或重复发送器。
 
@@ -90,7 +90,7 @@
 
 1. 每轮开始前读取服务当前已发布人格、必需更正、相关召回和必要近期对话，并登记依据。本轮多次工具调用共享快照，新发布不替换已经开始的轮次。
 2. 让目标 QQ 会话的人格来源唯一：保留 DSH 工具协议、权限规则和必要 QQ 格式约束，移除或替换竞争的固定编程人格、bridge 旧角色文本。仅追加“按新人格回答”不能作为完成条件。
-3. 旧 rc.1 在 `agent/pre-step` 之前组装系统提示词，因此原型使用带 `companion-memory` 来源的消息注入。rc.3 必须重新核对时序和受支持的动态上下文入口，验证实际模型输入及压缩后的重建行为，不沿用旧假设。
+3. 旧 rc.1 在 `agent/pre-step` 之前组装系统提示词，因此原型使用带 `rin-memory` 来源的消息注入。rc.3 必须重新核对时序和受支持的动态上下文入口，验证实际模型输入及压缩后的重建行为，不沿用旧假设。
 4. 近期对话与 DSH 历史按来源去重，不让同一段原文和摘要反复叠加。模型上下文能区分真实用户、记忆资料和工具结果。
 5. 回复模型与工具使用 DSH 设置；提炼和演化使用核心设置。人格发布不改 API 凭据、模型或工具权限，自动演化开关沿用管理台当前状态。
 
@@ -138,7 +138,7 @@
 每次改动先核对现有行为，默认最多新增 3 项独立行为测试，不引入测试依赖，不跑无关全量。优先补强人格版本/来源去重、按范围清理和断点恢复。
 
 ```powershell
-cd F:\game\projectNEKO\dsh-companion-memory
+cd F:\game\projectNEKO\dsh-rin-memory
 npm run check
 npm test
 npm pack --dry-run --json
@@ -169,7 +169,7 @@ bridge 改动运行 build 和对应定向测试；核心改动运行受影响的
 
 上一批交接说明如下；当前执行使用 §9.11 的新指令：
 
-> 按 F:\game\projectNEKO\dsh-companion-memory\PLAN.md 的 DM01—DM06 实施，复用本目录原型，以升级后的 Windows DSH 0.2.1-rc.3 为目标，做成启用后与现有 QQ bridge 共存的统一人格和记忆插件。DSH 负责回复和工具，companion-memory 是唯一人格和长期记忆权威。补齐版本兼容、配置/身份、固定人格与召回、真实最终对话保存、QQ 明确更正遗忘、管理台同步、DSH 历史清理、持久补交及发送状态，跑通本机闭环。必要的桥接接口和客户端权限扩展一并完成。保持 QQ 配置、工具设置和静音，桌面操作与真实 QQ 发消息由用户自行完成。不提前开展 Linux、独立任务调度或视频音乐插件安装。进度只回填 companion-memory/docs/roadmap.md §2.4。
+> 按 F:\game\projectNEKO\dsh-rin-memory\PLAN.md 的 DM01—DM06 实施，复用本目录原型，以升级后的 Windows DSH 0.2.1-rc.3 为目标，做成启用后与现有 QQ bridge 共存的统一人格和记忆插件。DSH 负责回复和工具，rin-memory 是唯一人格和长期记忆权威。补齐版本兼容、配置/身份、固定人格与召回、真实最终对话保存、QQ 明确更正遗忘、管理台同步、DSH 历史清理、持久补交及发送状态，跑通本机闭环。必要的桥接接口和客户端权限扩展一并完成。保持 QQ 配置、工具设置和静音，桌面操作与真实 QQ 发消息由用户自行完成。不提前开展 Linux、独立任务调度或视频音乐插件安装。进度只回填 rin-memory/docs/roadmap.md §2.4。
 
 <a id="qq-main-session-plan"></a>
 
@@ -204,7 +204,7 @@ bridge 改动运行 build 和对应定向测试；核心改动运行受影响的
 | 本插件 `index.js` | `preStep`、`ensureTurn`、`renderIncrement`；人格走 `deployment:persona-prefix` 系统段，背景按稳定指纹去重后只追加本轮增量 |
 | 本插件 `memory-client.js`、`session-store.js` | 保留协议、补交、引用和清理；补充当前上下文代际、已实际注入的背景及恢复所需的最少元数据 |
 | 本插件 `cordis.patch.yml`、发布清单 | 如需新增工作预设/运行模块，在原生 bundle 和包文件清单中声明 |
-| `companion-memory` HTTP 合同与删除链路 | 正常读写复用现有接口；仅在结构化召回或消费副本清理确有缺口时补最小兼容扩展 |
+| `rin-memory` HTTP 合同与删除链路 | 正常读写复用现有接口；仅在结构化召回或消费副本清理确有缺口时补最小兼容扩展 |
 
 实施前读取本机 `cordis-plugin-development`、`editing-cordis-compositions` 及所引用的 practices；以安装中的 rc.3 导出和原生检查为准。记录真正生效的主预设、系统段、全局贡献和工具集合。AgentTeam/AgentTeamNext 的插件名、段名和作用域从实际配置查询，避免猜名称或仅搜索桥接源码。
 
@@ -380,4 +380,4 @@ DeepSeek 前缀缓存依据见 [官方上下文缓存文档](https://api-docs.de
 
 ### 9.11 可直接转交给执行 agent 的指令
 
-> 按 F:\game\projectNEKO\dsh-companion-memory\PLAN.md §9 的 QP01—QP08 执行。本批重点是 Windows DSH rc.3 的 QQ 主会话：移除每条消息的 QQ 来源/临时风格包装和自动风格 skill；把当前完整人格放入系统提示；隔离编码、AgentTeam/AgentTeamNext 说明和工具。正常请求保持固定提示/工具/已发送历史，背景按稳定记忆条目只追加必要增量，用户原文单独收尾；原生轨迹可恢复，同一轮只采用一份依据。补齐压缩重建和网页来源消费副本的更正遗忘清理。主会话最终仅保留三个现有受限记忆工具及 companion_task，使用原生独立工作会话完成 start/status/cancel、去重、后台结果回传与重启核对。保留现有原文/最终回复保存、used/sent、断线补交和身份权限边界。先查真实 rc.3 作用域和最终 API 请求，复用现有代码，不重做上一批已交付修复。代码主要在本目录与 E:\dsh\plugins\dsh-qq-bridge，核心仅补确需的兼容合同/清理关联。保持账号、模型、人格和工具配置；不手改 profile、不接管桌面、不代发 QQ、不播放音频。完成定向验证与可安装交付后，由用户重启 DSH 并真实 QQ 验收。进度只回填 companion-memory/docs/roadmap.md §2.5，分别记录实现、隔离、桌面、模型和 QQ 验收。
+> 按 F:\game\projectNEKO\dsh-rin-memory\PLAN.md §9 的 QP01—QP08 执行。本批重点是 Windows DSH rc.3 的 QQ 主会话：移除每条消息的 QQ 来源/临时风格包装和自动风格 skill；把当前完整人格放入系统提示；隔离编码、AgentTeam/AgentTeamNext 说明和工具。正常请求保持固定提示/工具/已发送历史，背景按稳定记忆条目只追加必要增量，用户原文单独收尾；原生轨迹可恢复，同一轮只采用一份依据。补齐压缩重建和网页来源消费副本的更正遗忘清理。主会话最终仅保留三个现有受限记忆工具及 companion_task，使用原生独立工作会话完成 start/status/cancel、去重、后台结果回传与重启核对。保留现有原文/最终回复保存、used/sent、断线补交和身份权限边界。先查真实 rc.3 作用域和最终 API 请求，复用现有代码，不重做上一批已交付修复。代码主要在本目录与 E:\dsh\plugins\dsh-qq-bridge，核心仅补确需的兼容合同/清理关联。保持账号、模型、人格和工具配置；不手改 profile、不接管桌面、不代发 QQ、不播放音频。完成定向验证与可安装交付后，由用户重启 DSH 并真实 QQ 验收。进度只回填 rin-memory/docs/roadmap.md §2.5，分别记录实现、隔离、桌面、模型和 QQ 验收。

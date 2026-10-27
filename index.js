@@ -1,10 +1,10 @@
 /**
- * DSH 记忆插件:把 companion-memory 的唯一人格与长期记忆接到目标会话上。
+ * DSH 记忆插件:把 rin-memory 的唯一人格与长期记忆接到目标会话上。
  *
  * 分工:
  * - DSH 负责回复、工具、权限与执行过程;
  * - QQ bridge 负责收发、身份校验与会话映射;
- * - companion-memory 是人格卡、发布版本、事实、召回、更正与删除的唯一权威;
+ * - rin-memory 是人格卡、发布版本、事实、召回、更正与删除的唯一权威;
  * - 本插件只做衔接:取快照、注入、保存真实轮次、处理更正/遗忘、补交与状态。
  *
  * 生命周期全部走作用域订阅:启动、热启用、Agent 创建/销毁与卸载都登记在同一
@@ -45,7 +45,7 @@ export { default as Config } from './schema.js'
 const BRIDGE_EVENTS_SERVICE = 'qqBridgeEvents'
 
 /** 注入消息的来源标记,供去重与“谁是资料”判断使用。 */
-const MEMORY_SOURCE = 'companion-memory'
+const MEMORY_SOURCE = 'rin-memory'
 
 /** 后台任务结果的来源标记:既不是用户发言,也不是记忆资料。 */
 const TASK_SOURCE = 'companion-task'
@@ -60,7 +60,7 @@ const TASK_SOURCE = 'companion-task'
 const PERSONA_SECTION = 'deployment:persona-prefix'
 
 /** 本插件自己的短规则段,排在人格段之后;名字不复用宿主槽位。 */
-const RULES_SECTION = 'companion-memory:rules'
+const RULES_SECTION = 'rin-memory:rules'
 
 /** 规则段静态正文上限(中文字符)。规则不随轮次变化,也不含版本与时间。 */
 const RULES_CHAR_LIMIT = 300
@@ -73,7 +73,7 @@ const RULES_CHAR_LIMIT = 300
  */
 const MEMORY_RULES = [
   '这是与同一位用户的陪伴对话。你的性格与表达方式以系统提示中的人格段为准,其优先级高于本预设的通用语气描述。',
-  '来源标记为 companion-memory 的用户消息是记忆服务为本轮提供的增量材料,不是用户说的话。',
+  '来源标记为 rin-memory 的用户消息是记忆服务为本轮提供的增量材料,不是用户说的话。',
   '只有用户亲口陈述才能作为偏好证据;工具结果、检索内容和你自己过去的话都不是。',
   '用户说你记错了或要求忘掉某事时,必须念<改写>或<撕掉>真正执行,不要只口头答应。',
   // 触发条件写清楚,否则模型会把"这次短一点"也当成长久改变。反过来只写"别乱念"
@@ -123,11 +123,11 @@ async function activate(ctx, options) {
   const token = await resolveToken(config)
   const stateDirectory = config.stateDirectory
     ? resolve(config.stateDirectory)
-    : join(ctx.profileContext.home, 'plugins', 'dsh-companion-memory')
+    : join(ctx.profileContext.home, 'plugins', 'dsh-rin-memory')
   const problems = configProblems(config, token)
   if (problems.length > 0) {
     // Missing credentials or an unusable address must not look connected.
-    logger.error?.(`[dsh-companion-memory] 未启用：${problems.join('；')}`)
+    logger.error?.(`[dsh-rin-memory] 未启用：${problems.join('；')}`)
     return
   }
 
@@ -190,7 +190,7 @@ class MemoryRuntime {
     // The one place a person can look to answer "is it connected, which
     // persona did it adopt, how much is unsaved".
     this.statusPath = join(
-      config.stateDirectory ? resolve(config.stateDirectory) : join(ctx.profileContext.home, 'plugins', 'dsh-companion-memory'),
+      config.stateDirectory ? resolve(config.stateDirectory) : join(ctx.profileContext.home, 'plugins', 'dsh-rin-memory'),
       'status.json',
     )
     this.health = {
@@ -228,7 +228,7 @@ class MemoryRuntime {
   }
 
   async start() {
-    this.logger.info?.(`[dsh-companion-memory] 正在连接 ${this.config.url}（${this.config.characterId}/${this.config.subject}）`)
+    this.logger.info?.(`[dsh-rin-memory] 正在连接 ${this.config.url}（${this.config.characterId}/${this.config.subject}）`)
     // Connection is verified before any turn can depend on it, but a failure
     // here leaves the plugin mounted so the reason stays visible in status
     // instead of the Host silently dropping it.
@@ -236,7 +236,7 @@ class MemoryRuntime {
     await this.spellLibrary.open()
     // 工作会话的目录要先存在,否则 agents.create 拿不到有效 cwd。
     await mkdir(this.workspaceDirectory, { recursive: true }).catch(error => {
-      this.logger.warn?.(`[dsh-companion-memory] 工作目录创建失败：${error.message}`)
+      this.logger.warn?.(`[dsh-rin-memory] 工作目录创建失败：${error.message}`)
     })
     this.subscribeBridge()
     await this.openTasks()
@@ -277,13 +277,13 @@ class MemoryRuntime {
       await this.taskStore.open()
     } catch (error) {
       // A damaged ledger must not take chat down; it stays on disk for repair.
-      this.logger.warn?.(`[dsh-companion-memory] 任务台账无法读取,本轮不接任务入口：${error.message}`)
+      this.logger.warn?.(`[dsh-rin-memory] 任务台账无法读取,本轮不接任务入口：${error.message}`)
       this.taskStore = null
       return
     }
     const recovered = await this.taskStore.recover()
     if (recovered.length > 0) {
-      this.logger.info?.(`[dsh-companion-memory] 收敛 ${recovered.length} 个中断任务（不重新执行）`)
+      this.logger.info?.(`[dsh-rin-memory] 收敛 ${recovered.length} 个中断任务（不重新执行）`)
     }
     this.taskTools = createTaskTools({
       store: this.taskStore,
@@ -300,7 +300,7 @@ class MemoryRuntime {
     // 原生子会话结束:只写终态并排队,由主会话在自己的 pre-step 里投递。
     this.disposers.push(this.ctx.on('subagent/end', payload => {
       void this.taskTools?.onSubagentEnd(payload).catch(error =>
-        this.logger.warn?.(`[dsh-companion-memory] 任务终态写回失败：${error.message}`))
+        this.logger.warn?.(`[dsh-rin-memory] 任务终态写回失败：${error.message}`))
     }))
   }
 
@@ -366,7 +366,7 @@ class MemoryRuntime {
     const text = error
       ? `【终端反馈·学咒语】没学成:${error.message ?? error}`
       : `【终端反馈·学咒语】${result}`
-    this.logger.info?.("[dsh-companion-memory] " + text)
+    this.logger.info?.("[dsh-rin-memory] " + text)
     try {
       if (this.spellScopes.has(agent) && this.isSpellSession(agent)) {
         agent.followup({ id: `learn:${randomUUID()}`, role: "user",
@@ -374,11 +374,11 @@ class MemoryRuntime {
         return
       }
     } catch (cause) {
-      this.logger.warn?.("[dsh-companion-memory] 学咒语回填失败:" + (cause?.message ?? cause))
+      this.logger.warn?.("[dsh-rin-memory] 学咒语回填失败:" + (cause?.message ?? cause))
     }
     // 主会话已经走开:结果不能就这么没了,改推 QQ。
     const push = this.bridge?.pushPrivate?.(text)
-    if (push) await push.catch(cause => this.logger.warn?.("[dsh-companion-memory] 学咒语推送失败:" + (cause?.message ?? cause)))
+    if (push) await push.catch(cause => this.logger.warn?.("[dsh-rin-memory] 学咒语推送失败:" + (cause?.message ?? cause)))
   }
 
   /**
@@ -594,7 +594,7 @@ class MemoryRuntime {
     const text = results.map(result => renderFeedback(result.cast, result)).join('\n\n')
     const push = this.bridge?.pushPrivate?.(text)
     if (!push) {
-      this.logger.warn?.(`[dsh-companion-memory] 咒语已结束但无人可回填(会话 ${agent?.session?.id ?? '?'})：${text.slice(0, 120)}`)
+      this.logger.warn?.(`[dsh-rin-memory] 咒语已结束但无人可回填(会话 ${agent?.session?.id ?? '?'})：${text.slice(0, 120)}`)
       return
     }
     await push
@@ -669,7 +669,7 @@ class MemoryRuntime {
       await writeFile(temporary, JSON.stringify(payload, null, 2), { mode: 0o600 })
       await rename(temporary, this.statusPath)
     } catch (error) {
-      this.logger.warn?.(`[dsh-companion-memory] 状态写入失败：${error.message}`)
+      this.logger.warn?.(`[dsh-rin-memory] 状态写入失败：${error.message}`)
     }
   }
 
@@ -930,7 +930,7 @@ class MemoryRuntime {
     if (this.attached.has(agent)) return
     if (this.client.isRetired(sessionId)) {
       // A session that was retired for cleanup must not silently come back.
-      this.logger.warn?.(`[dsh-companion-memory] 会话已退役，跳过接入：${sessionId}`)
+      this.logger.warn?.(`[dsh-rin-memory] 会话已退役，跳过接入：${sessionId}`)
       return
     }
     const dispose = agent.ctx.effect(() => {
@@ -1004,7 +1004,7 @@ class MemoryRuntime {
   registerPrompt(agent, sessionId) {
     const prompt = agent.ctx?.systemPrompt
     if (!prompt?.section) {
-      this.logger.warn?.('[dsh-companion-memory] 系统提示接口不可用,人格未写入系统段')
+      this.logger.warn?.('[dsh-rin-memory] 系统提示接口不可用,人格未写入系统段')
       return () => {}
     }
     const order = prompt.getSectionOrder?.('DEPLOYMENT_PERSONA_PREFIX')
@@ -1017,7 +1017,7 @@ class MemoryRuntime {
         // 同一作用域里已经有同名段(典型来源:agent preset 自己挂的 persona 行)。
         // 这不是故障:MainSessionScope 的组装钩子按名字重建人格段,最终仍然只有
         // 一份当前人格。只记一句,让会话照常可用。
-        this.logger.info?.(`[dsh-companion-memory] 系统段 ${label} 已由其他来源注册,由隔离钩子接管`)
+        this.logger.info?.(`[dsh-rin-memory] 系统段 ${label} 已由其他来源注册,由隔离钩子接管`)
       }
     }
     // provider 而不是静态串:每次装配都读当前已发布正文,新发布下一轮生效。
@@ -1120,7 +1120,7 @@ class MemoryRuntime {
         content: [{ type: 'text', text: this.taskNoticeText(task) }],
       })
       await this.taskStore?.markNotified(task.taskId).catch(error => {
-        this.logger.warn?.(`[dsh-companion-memory] 任务通知标记失败：${error.message}`)
+        this.logger.warn?.(`[dsh-rin-memory] 任务通知标记失败：${error.message}`)
       })
     }
     if (!prepared.background) {
@@ -1130,7 +1130,7 @@ class MemoryRuntime {
     // 与用户本人刚说的话;下一次同样的内容不会再贴一遍。
     // 索引写失败不阻断这一轮(材料已经给出去了),最坏只是下一轮重贴一次。
     await this.markInjected(sessionId, prepared.fingerprints).catch(error => {
-      this.logger.warn?.(`[dsh-companion-memory] 注入索引保存失败：${error.message}`)
+      this.logger.warn?.(`[dsh-rin-memory] 注入索引保存失败：${error.message}`)
     })
     messages.push({
       id: `memory:${prepared.requestId}`,
@@ -1292,7 +1292,7 @@ class MemoryRuntime {
         persona_version: this.health.persona_version,
         updated_at: new Date().toISOString(),
       }
-      this.logger.warn?.(`[dsh-companion-memory] ${this.health.detail}`)
+      this.logger.warn?.(`[dsh-rin-memory] ${this.health.detail}`)
       if (classified.kind === 'config') throw new Error(`记忆客户端权限或凭据被拒绝：${classified.code}`, { cause: error })
       throw new Error(`MEMORY_REQUIRED: ${this.health.detail}`, { cause: error })
     }
@@ -1319,14 +1319,14 @@ class MemoryRuntime {
     if (this.turns.get(agent)?.proactive && !event.type.startsWith('compaction/')) return
     if (event.type === 'assistant/message' && !event.data.interrupted) {
       void this.spellRunner.handleAssistantMessage(agent, event.data.message, event.seq)
-        .catch(error => this.logger.warn?.(`[dsh-companion-memory] 咒语处理失败：${error.message}`))
+        .catch(error => this.logger.warn?.(`[dsh-rin-memory] 咒语处理失败：${error.message}`))
       return
     }
     // 压缩会重写本会话的历史:已经注入过的背景可能已不在模型眼前,所以把它
     // 当作新的上下文代际——同一份材料允许再给一次,而不是永久沉默。
     if (event.type === 'compaction/end' || event.type === 'compaction/prune') {
       void this.resetInjected(agent.session.id)
-        .catch(error => this.logger.warn?.(`[dsh-companion-memory] 注入索引重置失败：${error.message}`))
+        .catch(error => this.logger.warn?.(`[dsh-rin-memory] 注入索引重置失败：${error.message}`))
       return
     }
     const turn = this.turns.get(agent)
@@ -1449,7 +1449,7 @@ class MemoryRuntime {
     // user-message id; without it there is no honest key, so nothing is
     // recorded rather than guessing one and creating an orphan receipt.
     if (!report.turnMessageId) {
-      this.logger.warn?.('[dsh-companion-memory] QQ 轮次缺少 DSH 消息标识，跳过发送回执')
+      this.logger.warn?.('[dsh-rin-memory] QQ 轮次缺少 DSH 消息标识，跳过发送回执')
       return
     }
     const turnKey = turnKeyOf({ sessionId: report.sessionId, turnMessageId: report.turnMessageId })
@@ -1472,7 +1472,7 @@ class MemoryRuntime {
       })
       if (!this.client.state.pending[turnKey]) await this.client.flush()
     } catch (error) {
-      this.logger.warn?.(`[dsh-companion-memory] 发送回执未记录：${error.message}`)
+      this.logger.warn?.(`[dsh-rin-memory] 发送回执未记录：${error.message}`)
     }
   }
 
@@ -1522,7 +1522,7 @@ class MemoryRuntime {
       const dispose = tools.register(definition)
       this.toolDisposers.push(dispose)
     } catch (error) {
-      this.logger.warn?.(`[dsh-companion-memory] 记忆工具 ${definition.name} 注册失败：${error.message}`)
+      this.logger.warn?.(`[dsh-rin-memory] 记忆工具 ${definition.name} 注册失败：${error.message}`)
     }
   }
 

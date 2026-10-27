@@ -45,7 +45,7 @@ export const MAIN_SESSION_TOOLS = Object.freeze([])
  * 只讲咒语怎么写、写完要等反馈,不讲"工具"两个字——那是函数调用语境的触发器。
  * 只有学习或忘掉咒语时更新正文，不含时间、版本或每轮数据。
  */
-export const MAGIC_SECTION = 'companion-memory:magic'
+export const MAGIC_SECTION = 'rin-memory:magic'
 
 /** 魔法段的正文。写法权在模型,执行权在程序;模型不得自己编造结果。 */
 const BASE_MAGIC_RULES = [
@@ -101,7 +101,7 @@ export const PERSONA_SECTION = 'deployment:persona-prefix'
 /** 这些名字出现在上游组装结果里,但不再进入主请求;保留导出供测试与排障引用。 */
 export const SUFFIX_SECTION = 'deployment:persona-suffix'
 export const IDENTITY_SECTION = 'harness:identity'
-export const RULES_SECTION = 'companion-memory:rules'
+export const RULES_SECTION = 'rin-memory:rules'
 
 /**
  * 常驻规则段的正文。
@@ -157,14 +157,14 @@ export class MainSessionScope {
     if (this.installed) return true
     const agentCtx = this.agent?.ctx
     if (!agentCtx?.on || !agentCtx?.tools?.guard) {
-      this.logger.warn?.('[dsh-companion-memory] 主会话隔离未安装:agent 作用域缺少所需能力')
+      this.logger.warn?.('[dsh-rin-memory] 主会话隔离未安装:agent 作用域缺少所需能力')
       return false
     }
     try {
       this.disposers.push(agentCtx.on('system-prompt/assemble', (assembly, _context, next) =>
         this.shapeAssembly(assembly, next)))
     } catch (error) {
-      this.logger.warn?.(`[dsh-companion-memory] 主会话组装钩子安装失败:${error?.message ?? error}`)
+      this.logger.warn?.(`[dsh-rin-memory] 主会话组装钩子安装失败:${error?.message ?? error}`)
       return false
     }
     // 关掉宿主的动态运行上下文:工作目录、文件/审批策略、checkout 路径、Web GUI
@@ -174,7 +174,7 @@ export class MainSessionScope {
       try {
         this.disposers.push(agentCtx.systemPrompt.suppressRuntimeContext())
       } catch (error) {
-        this.logger.warn?.(`[dsh-companion-memory] 运行上下文抑制未安装:${error?.message ?? error}`)
+        this.logger.warn?.(`[dsh-rin-memory] 运行上下文抑制未安装:${error?.message ?? error}`)
       }
     }
     // required 上下文会在 refreshContext() 被补回；在本会话覆盖其注册正文，
@@ -189,7 +189,7 @@ export class MainSessionScope {
           text: '',
         }))
       } catch (error) {
-        this.logger.warn?.(`[dsh-companion-memory] 工作目录上下文屏蔽未安装:${error?.message ?? error}`)
+        this.logger.warn?.(`[dsh-rin-memory] 工作目录上下文屏蔽未安装:${error?.message ?? error}`)
       }
     }
     try {
@@ -200,7 +200,7 @@ export class MainSessionScope {
     } catch (error) {
       // The prompt side already narrows what the model sees; the guard is a
       // second line of defence, so a failure here is reported, not fatal.
-      this.logger.warn?.(`[dsh-companion-memory] 主会话执行闸安装失败:${error?.message ?? error}`)
+      this.logger.warn?.(`[dsh-rin-memory] 主会话执行闸安装失败:${error?.message ?? error}`)
     }
     this.installed = true
     return true
@@ -223,7 +223,7 @@ export class MainSessionScope {
     try {
       persona = String(await this.currentPersona(this.agent) ?? '')
     } catch (error) {
-      this.logger.warn?.(`[dsh-companion-memory] 读取当前人格失败:${error?.message ?? error}`)
+      this.logger.warn?.(`[dsh-rin-memory] 读取当前人格失败:${error?.message ?? error}`)
       // Keep the last persona this session actually used rather than dropping
       // it: an empty system section would silently fall back to the preset's
       // generic voice, which is the competing persona this scope exists to

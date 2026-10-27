@@ -12,7 +12,7 @@
 #
 # 然后把 COMPANION_DSH_TOKEN 设成同一个令牌，再在 DSH 设置里打开 enabled。
 - insert:
-    - id: dsh-companion-memory
+    - id: dsh-rin-memory
       # 保留行 id 以承接既有配置，包名使用新的项目名。
       name: '@local/dsh-rin-memory'
       config:

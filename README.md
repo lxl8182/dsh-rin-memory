@@ -8,7 +8,7 @@
 
 铃，是唤醒与回应；芽，是人格的萌芽与成长。
 
-当前插件 `0.2.6` · 配套核心 `rin-memory 0.1.0.dev7` · DSH `0.2.1-rc.3` · Apache-2.0
+当前插件 `0.2.7` · 配套核心 `rin-memory 0.1.0.dev8` · DSH `0.2.1-rc.3` · Apache-2.0
 
 ## 相处时能感受到什么
 
@@ -58,7 +58,7 @@ cd dsh-rin-memory
 npm pack
 ```
 
-通过 DSH 的插件管理安装本目录或 `local-dsh-rin-memory-0.2.6.tgz`。包默认 `enabled: false`，配置并启用后才连接。插件零运行时依赖、无需构建；宿主依赖由 DSH 提供。
+通过 DSH 的插件管理安装本目录或 `local-dsh-rin-memory-0.2.7.tgz`。包默认 `enabled: false`，配置并启用后才连接。插件零运行时依赖、无需构建；宿主依赖由 DSH 提供。
 
 ### 3. 连接核心
 
@@ -98,11 +98,11 @@ proactiveEnabled: true
 
 模型可用 `[PASS]` 暂缓候选。生成前后及每次分段投递前会复查来源、事项版本和用户插话；只有平台接受的分段进入近期记忆。关闭 `proactiveEnabled` 即可暂停该消费循环。
 
-## 兼容既有安装
+## 升级既有安装
 
-仓库与 npm 包已更名为 `dsh-rin-memory` / `@local/dsh-rin-memory`。升级时通过插件管理替换旧包，并将 bundle 引用改为新包名。
+仓库目录与 npm 包统一为 `dsh-rin-memory` / `@local/dsh-rin-memory`，配置行 id 与插件状态目录也使用 `dsh-rin-memory`。升级时通过插件管理替换旧包，并同步迁移配置与状态目录。
 
-已有配置行 id `dsh-companion-memory`、数据来源 `pluginId: dsh_memory`、消息来源标记和本地状态目录保持兼容，已有授权、记忆来源与补交记录可继续沿用。QQ bridge 使用的 `qqBridgeEvents` 合同保持稳定。
+已有记忆来源 `pluginId: dsh_memory`、HTTP 合同与 QQ bridge 的 `qqBridgeEvents` 合同继续使用。
 
 ## 开发与文档
 

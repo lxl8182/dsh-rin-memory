@@ -279,7 +279,7 @@ test('the persona lives in the system section; only new background is injected; 
   assert.equal(agent.sections.length, 1, 'the persona slot is the only registered section')
   const personaSection = agent.sections.find(section => section.name === 'deployment:persona-prefix')
   assert.ok(personaSection, 'the persona occupies the host persona slot')
-  assert.ok(!agent.sections.some(section => section.name === 'companion-memory:rules'),
+  assert.ok(!agent.sections.some(section => section.name === 'rin-memory:rules'),
     'no standing rule section competes with the persona')
   // 下沉后的那句话仍然是有界、无每轮数据的静态正文。
   assert.ok(Array.from(MEMORY_RULES).length <= RULES_CHAR_LIMIT,
@@ -288,7 +288,7 @@ test('the persona lives in the system section; only new background is injected; 
 
   const first = await agent.preStep({ turn: 1, step: 1, messages: [userMessage('m1', '记住我喜欢红茶')] })
   const injected = first.messages.at(-1)
-  assert.equal(injected.source.kind, 'companion-memory')
+  assert.equal(injected.source.kind, 'rin-memory')
   // The persona is in the system section, never repeated in the message.
   assert.equal(agent.sectionText('deployment:persona-prefix'), '温柔而直白。')
   assert.ok(!injected.content[0].text.includes('温柔而直白。'), 'the full persona is not in the user message')
@@ -341,7 +341,7 @@ test('the persona lives in the system section; only new background is injected; 
   f.state.memoryIds = ['fact-2']
   const third = await agent.preStep({ turn: 3, step: 1, messages: [userMessage('m3', '还记得吗')] })
   const fresh = third.messages.at(-1)
-  assert.equal(fresh.source.kind, 'companion-memory')
+  assert.equal(fresh.source.kind, 'rin-memory')
   assert.match(fresh.content[0].text, /用户喜欢红茶/)
   assert.ok(!fresh.content[0].text.includes('不要使用旧称呼'), 'an unchanged correction is not repeated')
 
@@ -770,7 +770,7 @@ test('a compaction opens a new context generation, so material can be re-deliver
   }
   await new Promise(resolve => setTimeout(resolve, 40))
   const again = await agent.preStep({ turn: 3, step: 1, messages: [userMessage('m3', '继续说')] })
-  assert.equal(again.messages.at(-1)?.source?.kind, 'companion-memory',
+  assert.equal(again.messages.at(-1)?.source?.kind, 'rin-memory',
     'after compaction the material is delivered again')
   assert.match(again.messages.at(-1).content[0].text, /不要使用旧称呼/)
 })
@@ -966,5 +966,5 @@ test('missing required context blocks the native model boundary instead of falli
   await assert.rejects(agent.preStep({ turn: 2, step: 1, messages: [userMessage('m-block', '请继续')] }), /MEMORY_REQUIRED/)
   f.state.persona = '恢复后的已发布人格'
   const admitted = await agent.preStep({ turn: 2, step: 1, messages: [userMessage('m-block', '请继续')] })
-  assert.equal(admitted.messages.at(-1).source.kind, 'companion-memory')
+  assert.equal(admitted.messages.at(-1).source.kind, 'rin-memory')
 })

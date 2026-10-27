@@ -123,7 +123,7 @@ export function createTaskTools({ store, config = {}, logger = console, provideA
     try {
       children = await subagents.listChildren(task.parentSessionId, signal)
     } catch (error) {
-      logger.warn?.('[dsh-companion-memory] 任务子会话列表读取失败:' + error.message)
+      logger.warn?.('[dsh-rin-memory] 任务子会话列表读取失败:' + error.message)
       return undefined
     }
     const child = (Array.isArray(children) ? children : [])
@@ -188,7 +188,7 @@ export function createTaskTools({ store, config = {}, logger = console, provideA
       childId = activation?.childId ?? activation?.id
     } catch (error) {
       const message = error?.message ?? String(error)
-      logger.warn?.('[dsh-companion-memory] 任务派发失败 ' + task.taskId + ':' + message)
+      logger.warn?.('[dsh-rin-memory] 任务派发失败 ' + task.taskId + ':' + message)
       const failed = await store.markStatus(task.taskId, 'failed', {
         stopReason: 'dispatch-error',
         summary: '派发失败:' + message,
@@ -319,7 +319,7 @@ export function createTaskTools({ store, config = {}, logger = console, provideA
         return { status: 'invalid', error: 'unknown_action', message: 'action 只能是 start/status/cancel。' }
       } catch (error) {
         // 任务入口的失败不能让聊天中断。
-        logger.warn?.('[dsh-companion-memory] companion_task 失败:' + (error?.message ?? error))
+        logger.warn?.('[dsh-rin-memory] companion_task 失败:' + (error?.message ?? error))
         return { status: 'failed', error: error?.code ?? 'error', message: error?.message ?? String(error) }
       }
     },
@@ -349,7 +349,7 @@ export function createTaskTools({ store, config = {}, logger = console, provideA
       resultRef: childId,
     })
     if (settled) {
-      logger.info?.('[dsh-companion-memory] 任务 ' + settled.taskId + ' 结束:' + settled.status)
+      logger.info?.('[dsh-rin-memory] 任务 ' + settled.taskId + ' 结束:' + settled.status)
     }
     return settled
   }

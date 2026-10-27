@@ -13,7 +13,7 @@
  * @typedef {object} MemoryPluginConfig
  * @property {boolean} enabled 总开关。默认关闭:安装不等于启用。
  * @property {boolean} proactiveEnabled 是否消费服务的主动候选并唤醒主会话。
- * @property {string} url companion-memory 服务地址;只接受本机回环 HTTP。
+ * @property {string} url rin-memory 服务地址;只接受本机回环 HTTP。
  * @property {string} clientId 在服务端 stack.toml 里配置的客户端 id。
  * @property {string} characterId 读取记忆与人格的角色。
  * @property {string} subject 主体。个人记忆默认 `private`,群里不自动接入。
