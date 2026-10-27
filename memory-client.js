@@ -163,6 +163,7 @@ export class MemoryClient {
       // Only an actual injection writes here, so a restarted process does
       // not re-post memories it already delivered in this context.
       injected: raw.injected && typeof raw.injected === 'object' ? raw.injected : {},
+      proactiveOutputs: raw.proactiveOutputs ?? {},
     }
   }
 
@@ -481,6 +482,33 @@ export class MemoryClient {
     return await this.request('/v1/memory/forget', { subject: this.config.subject, ...body })
   }
 
+  /**
+   * 明确教导:把**一条已保存的用户消息**报给服务,由服务端读原文派生规则。
+   *
+   * 请求体只有来源与 CAS 依据,没有规则正文:
+   * - `source_key` 是本轮那条用户消息的来源键,服务端自己去 journal/recent 里
+   *   取原文;客户端塞不进任何它想让人格学的话。
+   * - `quoted_example.source_key` 是可选的授权示例(学另一个 bot 的表达方式),
+   *   同样必须是已保存消息;只传 key,不传文本。
+   * - `base_revision` 是调用方看到的卡修订号,冲突时服务端回 409 并附当前卡。
+   *
+   * 这里不做任何本地判定:拒绝原因(403 无能力 / 404 来源没保存 / 409 冲突 /
+   * 422 被判定不是教导)全部由服务端给出,原样上抛给咒语层回报主人。
+   */
+  async teach({ sourceKey, baseRevision, quotedExampleKey = '', subject, scene, sessionId } = {}) {
+    const body = {
+      subject: subject ?? this.config.subject,
+      source_key: sourceKey,
+      base_revision: Number(baseRevision ?? 0),
+      target: 'next_turn',
+    }
+    if (scene) body.scene = scene
+    if (sessionId) body.session_id = sessionId
+    if (quotedExampleKey) body.quoted_example = { source_key: quotedExampleKey }
+    return await this.request('/v1/persona/teach', body)
+  }
+
+
   // -- status ----------------------------------------------------------
 
   status() {
@@ -505,7 +533,7 @@ export class MemoryClient {
 }
 
 function emptyState() {
-  return { schema: 1, pending: {}, generated: {}, sessions: {}, references: {}, accepted: {}, sent: {}, recentTurns: {}, retiredSessions: [], cleanup: {}, status: {}, injected: {} }
+  return { schema: 1, pending: {}, generated: {}, sessions: {}, references: {}, accepted: {}, sent: {}, recentTurns: {}, retiredSessions: [], cleanup: {}, status: {}, injected: {}, proactiveOutputs: {} }
 }
 
 export { emptyState, hash as stableHash }

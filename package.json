@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-companion-memory",
-  "version": "0.2.3",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "description": "DSH 与独立 companion-memory 服务的人格和记忆接入",
@@ -22,6 +22,7 @@
     "index.js",
     "schema.js",
     "memory-client.js",
+    "proactive.js",
     "config.js",
     "session-store.js",
     "main-session.js",
@@ -42,7 +43,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check index.js && node --check memory-client.js && node --check config.js && node --check session-store.js && node --check main-session.js && node --check magic.js && node --check magic-tools.js && node --check spell-runner.js && node --check spell-library.js && node --check task-store.js && node --check task-tools.js"
+    "check": "node --check index.js && node --check proactive.js && node --check memory-client.js && node --check config.js && node --check session-store.js && node --check main-session.js && node --check magic.js && node --check magic-tools.js && node --check spell-runner.js && node --check spell-library.js && node --check task-store.js && node --check task-tools.js"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-agent": ">=0.2.1-rc.1 <0.2.2",

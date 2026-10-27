@@ -12,6 +12,7 @@
 /**
  * @typedef {object} MemoryPluginConfig
  * @property {boolean} enabled 总开关。默认关闭:安装不等于启用。
+ * @property {boolean} proactiveEnabled 是否消费服务的主动候选并唤醒主会话。
  * @property {string} url companion-memory 服务地址;只接受本机回环 HTTP。
  * @property {string} clientId 在服务端 stack.toml 里配置的客户端 id。
  * @property {string} characterId 读取记忆与人格的角色。
@@ -42,6 +43,7 @@ export const DEFAULT_CONFIG = {
   timeoutMs: 10000,
   sessionPrefixes: ['qq-'],
   memoryTools: true,
+  proactiveEnabled: true,
   stateDirectory: '',
   sessionsDirectory: '',
   maxPending: 256,
@@ -49,7 +51,7 @@ export const DEFAULT_CONFIG = {
   retireSessionsOnCleanup: true,
 }
 
-const BOOLEAN_FIELDS = ['enabled', 'memoryTools', 'retireSessionsOnCleanup']
+const BOOLEAN_FIELDS = ['enabled', 'memoryTools', 'retireSessionsOnCleanup', 'proactiveEnabled']
 const NUMBER_FIELDS = ['timeoutMs', 'maxPending', 'retryIntervalMs']
 const STRING_FIELDS = [
   'url', 'clientId', 'characterId', 'subject', 'pluginId',

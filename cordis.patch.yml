@@ -6,6 +6,9 @@
 #   subjects = ['private']
 #   plugin_id = 'dsh_memory'
 #   memory_tools = true      # 允许从 QQ 对话里更正/遗忘，可单独关闭
+#   persona_teach = true     # 允许明确教导表达方式
+#   memory_outputs = true    # 允许主动交流与 QQ 输出回执
+#   trusted_plugins = ['dsh_memory']
 #
 # 然后把 COMPANION_DSH_TOKEN 设成同一个令牌，再在 DSH 设置里打开 enabled。
 - insert:
@@ -23,6 +26,7 @@
         timeoutMs: 10000
         sessionPrefixes: ['qq-']
         memoryTools: true
+        proactiveEnabled: true
         stateDirectory: ''
         sessionsDirectory: ''
         maxPending: 256

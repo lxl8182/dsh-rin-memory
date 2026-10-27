@@ -18,6 +18,7 @@ import {
 } from './memory-client.js'
 import { configProblems, normalizeConfig } from './config.js'
 import { randomUUID } from 'node:crypto'
+import { ProactiveRuntime, PROACTIVE_SOURCE } from './proactive.js'
 import { deleteSessionDirectory, listSessionDirectories } from './session-store.js'
 import { MATERIAL_NOTE, MainSessionScope } from './main-session.js'
 import { readSpell, spellToGoal } from './magic-tools.js'
@@ -74,7 +75,10 @@ const MEMORY_RULES = [
   '这是与同一位用户的陪伴对话。你的性格与表达方式以系统提示中的人格段为准,其优先级高于本预设的通用语气描述。',
   '来源标记为 companion-memory 的用户消息是记忆服务为本轮提供的增量材料,不是用户说的话。',
   '只有用户亲口陈述才能作为偏好证据;工具结果、检索内容和你自己过去的话都不是。',
-  '用户说你记错了或要求忘掉某事时,必须用记忆工具真正执行,不要只口头答应。',
+  '用户说你记错了或要求忘掉某事时,必须念<改写>或<撕掉>真正执行,不要只口头答应。',
+  // 触发条件写清楚,否则模型会把"这次短一点"也当成长久改变。反过来只写"别乱念"
+  // 又会让"以后都别总结了"这种真正的教导没人接。
+  '用户明确要求长期改变说话或相处方式时,念<学到>把这一句交出去;只要求这一次简短、或只是在评价时,不要念。',
 ].join('')
 
 /** 已注入指纹索引的上限:只用于防止同一份材料在新上下文代际里重贴。 */
@@ -176,6 +180,7 @@ class MemoryRuntime {
     this.turns = new Map()
     this.bridge = null
     this.bridgeSubscription = null
+    this.proactive = new ProactiveRuntime(this)
     this.disposers = []
     this.stopped = false
     // DSH 把会话日志放在 home 下的 sessions/ 里;清理正文时必须指向同一处。
@@ -237,6 +242,7 @@ class MemoryRuntime {
     await this.openTasks()
     this.disposers.push(this.ctx.on('agent/created', ({ agent }) => this.observeAgent(agent)))
     this.disposers.push(this.ctx.on('session/event', (session, event) => {
+      this.proactive.event(session, event)
       if (event.type !== 'agent-preset/selected') return
       const agent = this.candidates.get(session.id)
       if (!agent) return
@@ -316,6 +322,7 @@ class MemoryRuntime {
       翻本子: async body => await this.spellRecall(body, agent),
       改写: async body => await this.spellCorrect(body, agent),
       撕掉: async body => await this.spellForget(body, agent),
+      学到: async body => await this.spellTeach(body, agent),
     }
   }
 
@@ -413,6 +420,136 @@ class MemoryRuntime {
     return receipt.applied
       ? `已经改过来了。${receipt.invalidated_fact_ids?.length ? `顺带作废了 ${receipt.invalidated_fact_ids.length} 条旧记录。` : ''}`
       : `没改成(${receipt.status ?? '未知原因'})。`
+  }
+
+  /**
+   * <学到>:把**本轮主人那句话**作为明确教导交出去,由服务端读原文派生规则。
+   *
+   * 安全底线三条,缺一不可:
+   * 1. 客户端只传 source_key —— 本轮 requestId 对应的那个,规则正文一个字都
+   *    不送;服务端拿自己的 journal/recent 原文去派生(设计 §8.5)。
+   * 2. 关键词正文(<学到>后面写什么)只用来指定"学哪一个",不作为规则来源:
+   *    如果主人授权学另一个 bot 的表达方式,正文里的那个 bot 名字/消息 id 会被
+   *    当作示例来源,发给服务端的同样只有 key(设计 §8.3)。
+   * 3. 直接生效,不设 pending 确认(用户 2026-10-27 拍板):教导本身就是主人的
+   *    明确指令,再问一次是多余的。身份段仍然冻结,这一点由服务端保证。
+   *
+   * 失败一律如实回报:403 没有能力、404 来源没保存、409 卡被改过、422 判定不是
+   * 教导(只是评价或只想要这一次)、transient 不落盘 —— 一个都不许吞成"学好了"。
+   */
+  async spellTeach(body, agent) {
+    const sessionId = this.spellSession(agent)
+    const turn = this.turns.get(agent)
+    if (!turn?.requestId) {
+      // 没有在跑的一轮就没有"本轮那句话":宁可如实说不知道学什么,也不猜一条。
+      throw new Error('眼下这一轮还没登记，不知道要学哪句话；等主人说完这一句再念。')
+    }
+    if (this.client.isRetired(sessionId)) throw new Error('原会话已清理，等新会话。')
+    const scopeId = sessionScopeId(sessionId)
+    const sourceKey = buildSourceKey(
+      this.config.pluginId, this.config.characterId, this.config.subject,
+      scopeId, turn.requestId,
+    )
+    // 卡修订号来自本轮真正采用的那份上下文;没取到就不编一个 —— 编出来的 CAS
+    // 依据要么必然冲突,要么让服务端以为调用方看过一张它没看过的卡。修订号 0
+    // 表示这张卡还没建立,没有可供比较的依据,教导本来就无从落地。
+    const baseRevision = Number(turn.prepared?.body?.card_revision)
+    if (!Number.isInteger(baseRevision) || baseRevision <= 0) {
+      throw new Error('这一轮没有可用的人格卡修订号（卡可能还没建立），现在教不了。')
+    }
+    // 示例来源(学另一个 bot):正文写的是那条已保存消息的来源键或关键词,只把
+    // key 发出去;服务端会自己核对它确实是一条已保存的用户消息。
+    const exampleKey = this.teachExampleKey(body, scopeId)
+    try {
+      const receipt = await this.client.teach({
+        sourceKey,
+        baseRevision,
+        quotedExampleKey: exampleKey,
+        scene: `plugin:${this.config.pluginId}`,
+        sessionId: scopeId,
+      })
+      return this.describeTeaching(receipt, { example: Boolean(exampleKey) })
+    } catch (error) {
+      throw new Error(this.describeTeachingFailure(error))
+    }
+  }
+
+  /**
+   * 从咒语正文里取示例来源键。
+   *
+   * 只认**看起来是来源键**的那一段(包含 ':' 且不是自然语言句子);其余正文一律
+   * 丢弃 —— 它可能是主人对那个 bot 的描述,那些字不是已保存消息,不能当示例。
+   */
+  teachExampleKey(body, scopeId) {
+    const text = String(body ?? '').trim()
+    if (!text) return ''
+    // 允许直接写一个完整来源键,或写"示例:<key>"。两种都只取 key。
+    const candidate = text.replace(/^示例[:：]\s*/, '').trim()
+    if (!candidate || /\s/.test(candidate) || !candidate.includes(':')) return ''
+    // 服务端按 plugin:<plugin>:<character>:<subject>:<session>:<event> 解析;
+    // 形状不对就当作"没有可用的已保存示例",不当成 key 发出去。
+    const parts = candidate.split(':')
+    if (parts.length !== 6 || parts[0] !== 'plugin') return ''
+    return candidate
+  }
+
+  /** 把服务的教导回执说成人话;status 为 transient 时明确说明这次不长久。 */
+  describeTeaching(receipt, { example = false } = {}) {
+    const status = String(receipt?.status ?? '')
+    if (status === 'transient') {
+      return '这条只是这一次的要求，我已经照做了，但没写进长期的习惯里。'
+    }
+    const rules = (receipt?.rules ?? [])
+      .map(rule => String(rule?.text ?? '').trim())
+      .filter(Boolean)
+    const learned = rules.length > 0
+      ? `记下了：${rules.join('；')}`
+      : '记下这一条了。'
+    const version = receipt?.published_version ? `（已发布 ${receipt.published_version}）` : ''
+    const again = receipt?.duplicate ? '这条之前就学过，没有重复记。' : ''
+    const exampleNote = example ? '示例只当引子，不会照抄它说的话。' : ''
+    return [again || learned + version, exampleNote].filter(Boolean).join('')
+  }
+
+  /**
+   * 教导失败的可读原因。
+   *
+   * 404/409/422/403 都是**主人的问题或状态问题**,说得越具体越有用;transient
+   * 类的失败(连不上、忙)要明说没保存,不能让人以为已经长期生效了。
+   */
+  describeTeachingFailure(error) {
+    const status = Number(error?.status ?? 0)
+    const code = String(error?.code ?? '')
+    if (status === 403 || code === 'forbidden') {
+      return '服务没有给我教导人格的权限（persona_teach），这次没学成。'
+    }
+    if (status === 404 || code === 'not_found') {
+      return '服务那边找不到这句话的存档，没法拿它当依据；这次没学成。'
+    }
+    if (status === 409 || code === 'revision_conflict') {
+      return '人格卡刚被别人改过，我拿到的是旧版本；这次没学成，等下再说一遍。'
+    }
+    if (status === 410 || code === 'deleted') {
+      return '那句话已经被删掉了，不能拿它来教；这次没学成。'
+    }
+    if (status === 422 || code === 'rejected') {
+      const reason = String(error?.extra?.reason ?? '')
+      if (reason === 'not_a_style_teaching') {
+        return '这句听起来不像要我长期改说话方式，我没当成教导记下来。'
+      }
+      if (reason === 'revocation_requested') {
+        return '这句是让我别学它，得用别的办法撤回，不算一次教导。'
+      }
+      if (reason === 'section_frozen' || reason === 'expression_section_frozen') {
+        return '表达那一段被人格卡锁住了，现在改不了；这次没学成。'
+      }
+      return '服务判定这句不构成教导，没记下来。'
+    }
+    const kind = error?.kind ?? 'fatal'
+    if (kind === 'retry' || kind === 'config') {
+      return `没连上记忆服务（${describeFailure(error)}），这次没学成，也没写盘。`
+    }
+    return `没学成：${error?.message ?? '未知原因'}`
   }
 
   /** <撕掉>:真的删,不是嘴上答应。匹配到多条就退回候选,不自己挑。 */
@@ -538,6 +675,7 @@ class MemoryRuntime {
 
   async stop() {
     this.stopped = true
+    for (const run of this.proactive.active.values()) run.cancelled = true
     this.pendingLearnings.clear()
     await this.spellRunner.dispose()
     await this.bridgeSubscription?.dispose?.()
@@ -621,6 +759,7 @@ class MemoryRuntime {
         updated_at: new Date().toISOString(),
       }
     }
+    await this.proactive.tick()
     await this.publishStatus()
   }
 
@@ -754,7 +893,7 @@ class MemoryRuntime {
     this.candidates.delete(sessionId)
     this.admissions.delete(sessionId)
     await this.client.serial(async () => {
-      for (const section of ['pending', 'generated', 'sent', 'recentTurns']) {
+      for (const section of ['pending', 'generated', 'sent', 'recentTurns', 'proactiveOutputs']) {
         for (const [id, row] of Object.entries(this.client.state[section])) {
           if (row.scope?.session_id !== scopeId && row.native_session_id !== sessionId) continue
           delete this.client.state[section][id]
@@ -918,6 +1057,7 @@ class MemoryRuntime {
     }
     if (!input.sessionId) throw new Error('MEMORY_REQUIRED: 缺少 QQ 会话绑定')
     const sessionId = input.sessionId
+    await this.proactive.observe(input)
     this.client.state.sessions[sessionScopeId(sessionId)] = sessionId
     await this.client.save()
     const agent = this.candidates.get(sessionId)
@@ -1046,6 +1186,11 @@ class MemoryRuntime {
     if (existing && existing.turn === payload.turn) {
       return existing.prepared
     }
+    if (payload.messages?.some(message => message.source?.kind === PROACTIVE_SOURCE)) {
+      const prepared = await this.proactive.prepare(agent, payload)
+      if (prepared) return prepared
+      if (!payload.messages.some(message => message.source?.kind === 'user')) return undefined
+    }
     const input = latestUserInput(agent, payload)
     if (!input) return undefined
     if (Object.keys(this.client.state.pending).length + Object.keys(this.client.state.generated).length >= this.config.maxPending) {
@@ -1171,6 +1316,7 @@ class MemoryRuntime {
 
   sessionEvent(agent, subject, event) {
     if (subject !== agent.session && subject?.id !== agent.session?.id) return
+    if (this.turns.get(agent)?.proactive && !event.type.startsWith('compaction/')) return
     if (event.type === 'assistant/message' && !event.data.interrupted) {
       void this.spellRunner.handleAssistantMessage(agent, event.data.message, event.seq)
         .catch(error => this.logger.warn?.(`[dsh-companion-memory] 咒语处理失败：${error.message}`))
@@ -1567,7 +1713,7 @@ export function turnKeyOf({ sessionId, turn, messageId, turnMessageId }) {
 
 /** 这一轮真实的用户输入:优先 bridge 报告的,其次会话里新追加的用户消息。 */
 function latestUserInput(agent, payload) {
-  if (payload.messages?.some(message => message.source?.kind === SPELL_SOURCE)
+  if (payload.messages?.some(message => [SPELL_SOURCE, PROACTIVE_SOURCE].includes(message.source?.kind))
     && !payload.messages.some(message => message.source?.kind === 'user')) return undefined
   const candidates = []
   for (const message of payload.messages ?? []) {
@@ -1689,12 +1835,182 @@ function correctionEntries(corrections) {
     }))
 }
 
+/** 状态桶的显示名。顺序即渲染顺序,与核心的 STATE_KINDS 一致。 */
+const STATE_LABELS = Object.freeze({
+  thoughts: '想法',
+  moods: '情绪',
+  concerns: '关注',
+  progress: '进展',
+})
+
+/** 她自己当下的状态(想法/情绪);其余两桶是"进行中的事",另归一段。 */
+const SELF_STATE_KINDS = Object.freeze(['thoughts', 'moods'])
+
+/**
+ * 一条工作摘要条目的指纹。
+ *
+ * 用条目 id 加正文哈希:同一条被改写(例如规则重新措辞、事实被更正)就是新的
+ * 一版,必须重新告知;正文不变则无论重连、重启多少次都只交付一次。
+ */
+function summaryFingerprint(prefix, id, text) {
+  const stable = stableText(text)
+  return `${prefix}:${id || stableHash(stable)}:${stableHash(stable)}`
+}
+
+/**
+ * 工作摘要里的一段(成长与关系 / 重要事实 / 未完话题)→ 可渲染的条目。
+ *
+ * 摘要段自带 `block` 整段文本,但整段会把三段混在一起,无法分别控制;这里只
+ * 认 `items`:每条有 id 与正文,才能给出稳定指纹,也才能既渲染又去重。
+ */
+function summaryEntries(section, prefix) {
+  const items = Array.isArray(section?.items) ? section.items : []
+  const entries = []
+  for (const item of items) {
+    const text = String(item?.text ?? '').trim()
+    if (!text) continue
+    // 规则/变化/认识/关系条目带 label("约好""变化"…),显示出来更清楚。
+    const label = String(item?.label ?? '').trim()
+    const id = String(item?.id ?? item?.rule_id ?? item?.thread_id ?? '')
+    entries.push({
+      text: label ? `${label}：${text}` : text,
+      fingerprint: summaryFingerprint(prefix, id, text),
+    })
+  }
+  return entries
+}
+
+/** 未完话题的显示:进行中/等消息是两种不同的跟进状态,别混成一句。 */
+function threadEntries(section) {
+  const items = Array.isArray(section?.items) ? section.items : []
+  const entries = []
+  for (const item of items) {
+    const text = String(item?.text ?? '').trim()
+    if (!text) continue
+    const state = String(item?.state ?? 'open')
+    const marker = state === 'waiting' ? '等消息' : (state === 'done' ? '已结束' : '进行中')
+    const next = String(item?.next_step ?? '').trim()
+    const id = String(item?.thread_id ?? item?.id ?? '')
+    entries.push({
+      text: `[${marker}] ${text}${next ? `，下一步：${next}` : ''}`,
+      fingerprint: summaryFingerprint('thread', id, text),
+    })
+  }
+  return entries
+}
+
+/**
+ * 退回用召回自带的成长块(老版本服务只有 block,没有 working_summary)。
+ *
+ * 按行拆并跳过标题行:标题("相处与成长"之类)不是条目,给它一个指纹会变成一条
+ * 永远不会变、也永远删不掉的假条目。
+ */
+function growthBlockEntries(growth) {
+  const block = String(growth?.block ?? '').trim()
+  if (!block) return []
+  const version = String(growth?.version ?? '')
+  return block
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line => !/^[【\[][^】\]]*[】\]]$/.test(line))
+    .map(line => {
+      const text = line.replace(/^[-*]\s*/, '')
+      return { text, fingerprint: summaryFingerprint('growtext', version, text) }
+    })
+}
+
+/**
+ * 真实状态快照 → 两类条目。
+ *
+ * 刻意**不用** `state.block`:那一段把情绪强度按衰减渲染成数字,每过一小时就
+ * 变一次,拿它做指纹会让同一条状态永远"是新的"。这里按桶自己渲染,指纹只认
+ * 标签与正文。
+ *
+ * `self` 是她自己的当下(想法、情绪),换话题不影响; `threads` 是进行中的事
+ * (关注、进展),属于"旧事项",是否需要让模型看见由增量与去重决定。
+ */
+function stateEntries(state) {
+  const buckets = state && typeof state.state === 'object' && state.state ? state.state : {}
+  const self = []
+  const threads = []
+  for (const kind of Object.keys(STATE_LABELS)) {
+    const rows = Array.isArray(buckets[kind]) ? buckets[kind] : []
+    for (const item of rows) {
+      if (!item || typeof item !== 'object') continue
+      let text = ''
+      let key = ''
+      if (kind === 'moods') {
+        const label = String(item.label ?? '').trim()
+        if (!label) continue
+        const cause = String(item.cause ?? '').trim()
+        // 强度会随时间衰减,不进正文也不进指纹:那不是"新状态",只是旧状态变淡。
+        text = cause ? `${label}（因为${cause}）` : label
+        key = `mood:${stableHash(label)}:${stableHash(cause)}`
+      } else {
+        text = String(item.text ?? '').trim()
+        if (!text) continue
+        key = `${kind}:${stableHash(stableText(text))}`
+      }
+      const id = String(item.id ?? '')
+      const entry = {
+        text: `${STATE_LABELS[kind]}：${text}`,
+        fingerprint: `state:${key}:${id}`,
+      }
+      if (SELF_STATE_KINDS.includes(kind)) self.push(entry)
+      else threads.push(entry)
+    }
+  }
+  return { self, threads }
+}
+
+/**
+ * 「这段经历」段。
+ *
+ * 一次经历是一条**整体**:把它拆成逐行条目会在只改一行时把整段重贴一遍,所以
+ * 整段一个指纹,内容(结果、终态、后续时间)变了才算新的一版。
+ */
+function episodeEntries(context) {
+  const section = context?.working_summary?.sections?.episode
+  const block = String(section?.block ?? '').trim()
+  if (!block) return []
+  const item = Array.isArray(section?.items) ? section.items[0] : undefined
+  const id = String(
+    item?.episode_id
+    ?? context?.working_summary?.episode?.episode_id
+    ?? context?.episode?.episode_id
+    ?? '',
+  )
+  // 第一行是段自己的标题("这段经历"),由本插件给段名,所以去掉。
+  const body = block
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .slice(1)
+    .filter(line => !/^【?这段经历】?$/.test(line))
+  if (body.length === 0) return []
+  const joined = body.join('|')
+  return [{
+    text: body.join('\n'),
+    fingerprint: summaryFingerprint('epi', id, joined),
+  }]
+}
+
 /**
  * 只渲染本轮新的增量背景,并给出本轮材料的指纹。
  *
  * `seen` 是**确实已注入过**的指纹集合。函数是纯的:同一份 context 与同一份
  * seen 一定得到同一段正文与同一批指纹,调用方才能安全地在真正注入之后
  * 才登记它们。没有任何新增时 `text` 为空串——调用方不追加任何消息。
+ *
+ * 八段材料,前三段是最初就有的(必须遵守的更正 / 可能相关的记忆 / 近期对话),
+ * 后五段(相处与成长 / 重要事实 / 当前状态 / 正在进行的事 / 这段经历)是 M6 加的
+ * 工作摘要层(设计 §10.1 的第二层"当前工作摘要")。它们和前三段**同一条纪律**:
+ * 只有本轮真的没交付过的条目才进正文,已交付的不重贴。
+ *
+ * 这条纪律同时也是"不破坏新话题"的机制:旧事项在它第一次被交付之后就再也不会
+ * 出现在后续轮次的材料里,所以用户换话题时不会有一堆旧事被硬拉回来。真正的
+ * 续接由服务端的召回与 followup 判定负责,不靠这里每轮复读。
  */
 export function renderIncrement(context, seen = {}, options = {}) {
   const scopeId = options.scopeId ?? ''
@@ -1742,6 +2058,65 @@ export function renderIncrement(context, seen = {}, options = {}) {
   if (recentEntries.length > 0) {
     sections.push(['[近期对话]', ...recentEntries.map(entry => entry.text)].join('\n'))
     for (const entry of recentEntries) fingerprints.push(entry.fingerprint)
+  }
+
+  // M6:工作摘要层。服务端 M5 之后在 /v1/context 上 additive 多给了
+  // working_summary / state / episode;老版本服务没有这些字段时下面的 helper
+  // 各自返回空数组,渲染结果与改造前逐字节相同。
+  const summary = context?.working_summary
+  const growth = fresh([
+    ...summaryEntries(summary?.sections?.growth, 'grow'),
+    // 只有服务没给 working_summary 时才退回旧的可操作成长块,避免同一批认识
+    // 被两个来源各交付一次。
+    ...(summary?.sections?.growth ? [] : growthBlockEntries(context?.growth)),
+  ])
+  if (growth.length > 0) {
+    sections.push(['[相处与成长]', ...growth.map(entry => entry.text)].join('\n'))
+    for (const entry of growth) fingerprints.push(entry.fingerprint)
+  }
+
+  // 同一条事实常常既被召回命中、又出现在重要事实摘要里。摘要只是投影,召回
+  // 才是这一轮的针对性结果;两段都贴一遍等于同一句话给模型看两次,还会让它
+  // 误以为是很重要而反复强调的事。所以正文已经出现过的条目在摘要段里让位。
+  // 同一句话在两处的写法常不一样(召回是"用户喜欢红茶",摘要是"喜欢红茶"),
+  // 所以按**互相包含**判定重复,而不是精确相等。
+  const spoken = memories
+    .map(entry => stableText(entry.text.replace(/^[-*]\s*/, '')))
+    .filter(Boolean)
+  const alreadySaid = text => {
+    const clean = stableText(text)
+    if (!clean) return false
+    return spoken.some(line => line.includes(clean) || clean.includes(line))
+  }
+  const facts = fresh(summaryEntries(summary?.sections?.important_facts, 'fact'))
+    .filter(entry => !alreadySaid(entry.text))
+  if (facts.length > 0) {
+    sections.push(['[重要事实]', ...facts.map(entry => entry.text)].join('\n'))
+    for (const entry of facts) fingerprints.push(entry.fingerprint)
+  }
+
+  const { self, threads } = stateEntries(context?.state)
+  const selfEntries = fresh(self)
+  if (selfEntries.length > 0) {
+    // 她自己的状态:想法与情绪。这是"此刻"而不是"旧事",换话题也仍然成立。
+    sections.push(['[当前状态]', ...selfEntries.map(entry => entry.text)].join('\n'))
+    for (const entry of selfEntries) fingerprints.push(entry.fingerprint)
+  }
+
+  // 进行中的事与未完话题单独一段:它们是"旧事项",只在第一次真正交付时出现。
+  const pendingThreads = fresh([
+    ...threads,
+    ...threadEntries(summary?.sections?.open_threads),
+  ])
+  if (pendingThreads.length > 0) {
+    sections.push(['[正在进行的事]', ...pendingThreads.map(entry => entry.text)].join('\n'))
+    for (const entry of pendingThreads) fingerprints.push(entry.fingerprint)
+  }
+
+  const episode = fresh(episodeEntries(context))
+  if (episode.length > 0) {
+    sections.push(['[这段经历]', ...episode.map(entry => entry.text)].join('\n'))
+    for (const entry of episode) fingerprints.push(entry.fingerprint)
   }
 
   if (sections.length === 0) return { text: '', fingerprints: [] }

@@ -51,6 +51,9 @@ const Config = Schema.object({
   memoryTools: Schema.boolean()
     .default(true)
     .description('允许对话内更正/遗忘。仍需服务端为该客户端授予 memory_tools。'),
+  proactiveEnabled: Schema.boolean()
+    .default(true)
+    .description('允许已绑定的主人私聊接收有来源的主动消息；服务端需授权 memory_outputs。'),
   stateDirectory: Schema.string()
     .default('')
     .description('补交队列与状态文件目录；留空表示使用 profile 插件数据目录。'),
