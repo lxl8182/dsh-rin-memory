@@ -16,7 +16,7 @@
 
 本批执行入口为 [SPELL-PLAN.md](SPELL-PLAN.md)：咒语由本插件解析、执行和回填，bridge 只处理 QQ 标签展示。五类进度维护在[统一台账 §2.5](https://github.com/lxl8182/companion-memory/blob/main/docs/roadmap.md)。
 
-本插件把 DSH 接到独立 companion-memory 服务上：**companion-memory 是人格与长期记忆的唯一权威**，DSH 负责回复与工具，QQ bridge 负责收发与身份校验。
+边界上，本插件只做接入：**人格与长期记忆的权威判定在 companion-memory，DSH 负责回复与工具，QQ 登录与身份校验在 bridge**；插件本地只保留补交队列、插件配置与咒语台账。
 
 当前版本为 `0.2.3`，配套 QQ bridge `1.0.6-neko.3`。通过插件管理更新本地包后重启 DSH 加载新代码；原账号、白名单与模型配置继续使用。
 
