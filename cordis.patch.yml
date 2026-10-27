@@ -1,0 +1,30 @@
+# 记忆插件默认不启用：安装不等于接管人格。
+# 首次启用前先在 companion-memory 的 stack.toml 里为本客户端授权：
+#
+#   [clients.dsh-desktop]
+#   token_env = 'COMPANION_DSH_TOKEN'
+#   subjects = ['private']
+#   plugin_id = 'dsh_memory'
+#   memory_tools = true      # 允许从 QQ 对话里更正/遗忘，可单独关闭
+#
+# 然后把 COMPANION_DSH_TOKEN 设成同一个令牌，再在 DSH 设置里打开 enabled。
+- insert:
+    - id: dsh-companion-memory
+      name: '@local/dsh-companion-memory'
+      config:
+        enabled: false
+        url: http://127.0.0.1:48931
+        clientId: dsh-desktop
+        characterId: companion
+        subject: private
+        pluginId: dsh_memory
+        tokenEnv: COMPANION_DSH_TOKEN
+        tokenFile: ''
+        timeoutMs: 10000
+        sessionPrefixes: ['qq-']
+        memoryTools: true
+        stateDirectory: ''
+        sessionsDirectory: ''
+        maxPending: 256
+        retryIntervalMs: 15000
+        retireSessionsOnCleanup: true

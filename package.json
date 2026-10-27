@@ -1,0 +1,58 @@
+{
+  "name": "@local/dsh-companion-memory",
+  "version": "0.2.3",
+  "private": true,
+  "type": "module",
+  "description": "DSH 与独立 companion-memory 服务的人格和记忆接入",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lxl8182/dsh-companion-memory.git"
+  },
+  "homepage": "https://github.com/lxl8182/dsh-companion-memory#readme",
+  "bugs": {
+    "url": "https://github.com/lxl8182/dsh-companion-memory/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "schema.js",
+    "memory-client.js",
+    "config.js",
+    "session-store.js",
+    "main-session.js",
+    "magic.js",
+    "magic-tools.js",
+    "spell-runner.js",
+    "spell-library.js",
+    "task-store.js",
+    "task-tools.js",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.1-rc.1 <0.2.2"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check index.js && node --check memory-client.js && node --check config.js && node --check session-store.js && node --check main-session.js && node --check magic.js && node --check magic-tools.js && node --check spell-runner.js && node --check spell-library.js && node --check task-store.js && node --check task-tools.js"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-agent": ">=0.2.1-rc.1 <0.2.2",
+    "@deepseek-ai/dsh-system-prompt": ">=0.2.1-rc.1 <0.2.2",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.1 <0.2.2",
+    "@deepseek-ai/schemastery": "3.18.5"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
