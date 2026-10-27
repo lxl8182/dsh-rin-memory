@@ -18,10 +18,10 @@ const secret = field => (typeof field.role === 'function' ? field.role('secret')
 const Config = Schema.object({
   enabled: Schema.boolean()
     .default(false)
-    .description('启用后接入 companion-memory：接管人格、读取记忆并保存真实轮次。默认关闭。'),
+    .description('启用后接入铃芽 RIN：采用已发布人格、读取记忆并保存真实轮次。默认关闭。'),
   url: Schema.string()
     .default('http://127.0.0.1:48931')
-    .description('companion-memory 服务地址；只接受本机回环 HTTP。'),
+    .description('rin-memory 服务地址；只接受本机回环 HTTP。'),
   clientId: Schema.string()
     .default('dsh-desktop')
     .description('服务端 stack.toml 中配置的客户端 id。'),

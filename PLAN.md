@@ -8,7 +8,7 @@
 
 本机 DSH 已更新至 **0.2.1-rc.3**，本计划以 rc.3 为目标。当前开发包为记忆插件 `0.2.3`、bridge `1.0.6-neko.3`；实际检查和运行交付见统一台账。
 
-工作包状态只维护在 [统一开发台账](https://github.com/lxl8182/companion-memory/blob/main/docs/roadmap.md)：§2.4 对应基础记忆闭环，§2.5 对应本批主会话精简与缓存。本文定义实现与验收要求。
+工作包状态只维护在 [统一开发台账](https://github.com/lxl8182/rin-memory/blob/main/docs/roadmap.md)：§2.4 对应基础记忆闭环，§2.5 对应本批主会话精简与缓存。本文定义实现与验收要求。
 
 **1. 启用后应得到什么**
 
@@ -34,11 +34,11 @@
 | 服务与管理台 | `http://127.0.0.1:48931`，聊天页 `/designs/tidebell/index-watercolor.html#chat` |
 | 运行配置 | `F:\game\projectNEKO\companion-runtime\config\stack.toml` |
 | 当前接入身份 | `characterId=companion`、`subject=private`、`clientId=dsh-desktop`、`pluginId=dsh_memory` |
-| HTTP 合同 | [webui-console.md §2.3](https://github.com/lxl8182/companion-memory/blob/main/docs/webui-console.md)（见 §2.3 非宿主客户端合同） |
+| HTTP 合同 | [webui-console.md §2.3](https://github.com/lxl8182/rin-memory/blob/main/docs/webui-console.md)（见 §2.3 非宿主客户端合同） |
 
 2026-10-25 已有基础：用户在 rc.1 基线上确认官方 QQ 私聊可以正常回复。原型阶段已提供按 QQ 会话读取上下文、登记生成依据、完成轮次提交、原子落盘补交和清理阻断。
 
-**2026-10-25 已实施 DM01—DM05**（实现与隔离验收；DM06 待用户桌面启用与真实 QQ 操作）。实际改动与验证记录只在 [统一台账 §2.4](https://github.com/lxl8182/companion-memory/blob/main/docs/roadmap.md) 维护，本文保留的是实现要求。要点：桌面实际已是 rc.3，三个核心模块与 rc.1 逐字节相同，真正阻断加载的是兼容预检中的 rc.1 peer；核心新增 `memory_tools` 独立授权与 `/v1/memory/*` 受限端点、`sent` 传输回执；bridge 新增主人判定、最终可见文字、逐段发送结果与 `qqBridgeEvents` 只读出口；插件重写为 `config.js` + `memory-client.js` + `session-store.js` + `index.js`，清理时真正删除点名会话的本地日志。
+**2026-10-25 已实施 DM01—DM05**（实现与隔离验收；DM06 待用户桌面启用与真实 QQ 操作）。实际改动与验证记录只在 [统一台账 §2.4](https://github.com/lxl8182/rin-memory/blob/main/docs/roadmap.md) 维护，本文保留的是实现要求。要点：桌面实际已是 rc.3，三个核心模块与 rc.1 逐字节相同，真正阻断加载的是兼容预检中的 rc.1 peer；核心新增 `memory_tools` 独立授权与 `/v1/memory/*` 受限端点、`sent` 传输回执；bridge 新增主人判定、最终可见文字、逐段发送结果与 `qqBridgeEvents` 只读出口；插件重写为 `config.js` + `memory-client.js` + `session-store.js` + `index.js`，清理时真正删除点名会话的本地日志。
 
 接手先读：
 
@@ -49,7 +49,7 @@
 - `cordis.patch.yml`、`package.json`、`locale/`：原生插件包与配置入口。
 - `test/memory.test.js`：已有行为检查，在此基础上补关键缺口。
 - bridge 的 `src/plugin.ts`、`src/handlers/agent.ts`、`src/router.ts` 及相关收发模块：实际会话绑定、最终文字和发送边界。
-- [companion-memory/AGENTS.md](https://github.com/lxl8182/companion-memory/blob/main/AGENTS.md) 与上述 HTTP 合同：服务权限、更正删除、上下文失效与回执语义。
+- [companion-memory/AGENTS.md](https://github.com/lxl8182/rin-memory/blob/main/AGENTS.md) 与上述 HTTP 合同：服务权限、更正删除、上下文失效与回执语义。
 
 **3. 两个插件怎样共存**
 
@@ -175,7 +175,7 @@ bridge 改动运行 build 和对应定向测试；核心改动运行受影响的
 
 ## 9. QQ 主会话精简、缓存与任务分工（QP01—QP08）
 
-确定日期：2026-10-25。本节将用户已确认的主会话提示词、工具边界与前缀缓存要求合并为下一批实施规格。状态维护在 [roadmap §2.5](https://github.com/lxl8182/companion-memory/blob/main/docs/roadmap.md)。本文本身是计划，包版本及运行状态沿用上方基线；实施时再按实际交付更新。
+确定日期：2026-10-25。本节将用户已确认的主会话提示词、工具边界与前缀缓存要求合并为下一批实施规格。状态维护在 [roadmap §2.5](https://github.com/lxl8182/rin-memory/blob/main/docs/roadmap.md)。本文本身是计划，包版本及运行状态沿用上方基线；实施时再按实际交付更新。
 
 ### 9.1 交付目标与范围
 

@@ -28,7 +28,7 @@ import { createTaskTools } from './task-tools.js'
 import { SpellRunner, SPELL_SOURCE, startWorker } from './spell-runner.js'
 import { SpellLibrary, META_SPELLS, parseSolved } from './spell-library.js'
 
-export const name = 'dsh-companion-memory'
+export const name = 'dsh-rin-memory'
 export const inject = ['systemPrompt', 'profileContext']
 
 /**

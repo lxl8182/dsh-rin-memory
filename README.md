@@ -1,162 +1,119 @@
-# DSH 记忆插件（Windows 本机）
+<p align="center"><img src="icon.svg" width="96" alt="铃芽 RIN"></p>
 
-**这是什么**：DeepSeek-Harness（DSH）的记忆插件。它把 DSH 的会话接到独立的 companion-memory 记忆服务上——人格卡与长期记忆由 companion-memory 独家持有，DSH 负责回复与工具，QQ 收发由 dsh-qq-bridge 承担。
+<h1 align="center">DSH RIN Memory</h1>
+<p align="center"><strong>把铃芽 RIN 的人格、长期记忆与持续养成带进 DeepSeek Harness。</strong></p>
+<p align="center"><em>风起时铃响，记忆落土发芽。</em></p>
 
-**仓库关系**（三件套，各自独立仓库）：
+**dsh-rin-memory** 是 [铃芽 RIN](https://github.com/lxl8182/rin-memory) 的 DSH 接入端。RIN 代表 **Recall · 记忆召回、Identity · 人格身份、Nurture · 养成培育**。它让 QQ 和 DSH 中的角色采用同一份已发布人设，记住相处的来往，学会你认真教过的表达方式，并在适合的时候主动来聊。
 
-| 仓库 | 角色 |
+铃，是唤醒与回应；芽，是人格的萌芽与成长。
+
+当前插件 `0.2.6` · 配套核心 `rin-memory 0.1.0.dev7` · DSH `0.2.1-rc.3` · Apache-2.0
+
+## 相处时能感受到什么
+
+- **记得之前，也接得上现在。** 获取与当前话题相关的记忆、经历、状态和工作摘要；新增背景按指纹增量传入，原生压缩后可以重新采用。
+- **教一次，后面会沿用。** 你说“以后别每次都总结”，角色可以通过 `<学到>` 提交这一轮的原话来源，由核心形成可撤销的长期表达规则。
+- **关心有后续。** 未完事项、约定回访和共同兴趣成为主动候选，由同一个人格生成要说的话；你插话或事情已结束时撤回过时候选。
+- **角色主会话保持专注。** 系统提示由已发布人格和魔法段组成，主请求省略整个 `tools` 字段，保留第一人称角色扮演所用的上下文。操作任务交给独立标准 agent。
+- **说过、做过、发出去，各有记录。** 保存真实用户原话与最终对外文字；QQ 分段回执决定哪些输出进入近期记忆。失败正文持久保存，补发复用稳定 output ID。
+- **改错和忘记有实际动作。** `<改写>` 和 `<撕掉>` 调用核心的更正与删除链路，管理台的修改也会影响后续会话与待补交内容。
+
+## 三个项目怎样配合
+
+| 项目 | 职责 |
 |---|---|
-| [companion-memory](https://github.com/lxl8182/companion-memory) | 记忆与人格核心：唯一人格卡、发布版本、事实、召回、更正与删除规则，以及服务端 HTTP 合同 |
-| **dsh-companion-memory**（本仓库） | DSH 接入端：插件包，注入人格与记忆、保存轮次、执行咒语并回填 |
-| [dsh-qq-bridge](https://github.com/lxl8182/dsh-qq-bridge) | QQ 桥：登录、主人身份校验、消息收发、出站标签剥离 |
+| [rin-memory](https://github.com/lxl8182/rin-memory) | 铃芽核心与管理台：人格、记忆、反思、成长、发布及更正删除 |
+| **dsh-rin-memory** | DSH 接入：人格与记忆采用、教导咒语、工作会话、主动交流及保存回执 |
+| [dsh-qq-bridge](https://github.com/lxl8182/dsh-qq-bridge) | QQ 通道：登录、主人校验、收发、会话绑定、出站标签剥离与持久投递 |
 
-本包是本地插件（`private: true`，不发 npm）、零运行时依赖、无需构建；许可为 [Apache-2.0](LICENSE)。
+DSH 提供模型、原生会话、工具和权限。RIN 核心持有人格与长期记忆；插件本地保存配置、补交状态与咒语台账。QQ 个人记忆只接入 bridge 校验的主人私聊。
 
-**接手开发先读 [PLAN.md](PLAN.md)**：统一人格、记忆、保存、更正删除和恢复在本插件实现，与 QQ bridge 共存，目标版本 DSH `0.2.1-rc.3`。状态只在 [统一开发台账 §2.4](https://github.com/lxl8182/companion-memory/blob/main/docs/roadmap.md) 维护。
+## 开始使用
 
-本批执行入口为 [SPELL-PLAN.md](SPELL-PLAN.md)：咒语由本插件解析、执行和回填，bridge 只处理 QQ 标签展示。五类进度维护在[统一台账 §2.5](https://github.com/lxl8182/companion-memory/blob/main/docs/roadmap.md)。
+先启动 [rin-memory](https://github.com/lxl8182/rin-memory)，创建角色并发布人设。
 
-边界上，本插件只做接入：**人格与长期记忆的权威判定在 companion-memory，DSH 负责回复与工具，QQ 登录与身份校验在 bridge**；插件本地只保留补交队列、插件配置与咒语台账。
+### 1. 授予接入能力
 
-当前版本为 `0.2.5`，配套 QQ bridge `1.0.6-neko.4` 与 companion-memory `0.1.0.dev6`。已接入候选领取、后台唤醒主会话、QQ 持久投递与 outputs 回执。通过插件管理更新本地包后重启 DSH 加载新代码；原账号、白名单与模型配置继续使用。
-
-## 启用后得到什么
-
-- QQ 私聊使用管理台当前**已发布**的人格；网页与 QQ 的个人记忆按现有范围规则共享。
-- **系统提示为完整人格 + 魔法段，主会话 0 tools**。人格使用宿主的 `deployment:persona-prefix` 槽位，正文由核心提供；魔法段列出内置咒语与学到的名字、说明。
-- **主会话屏蔽运行上下文**：可选上下文由 `suppressRuntimeContext()` 抑制；`required` 的工作目录由会话内同名空文本注册覆盖，发请求前刷新时也保持为空。没有其他必需上下文时，新会话不生成 `Current runtime context…` 英文前缀或目录快照；实际 cwd 和标准 worker 保持正常。首次加载这项修复需要完全退出并重启 DSH，再新建 QQ 会话，避开旧轨迹中的快照。`team:identity` 若仍启用，按其独立注册处理。
-- 用户消息只包含用户原话：人格卡不再作为每条消息的快照重复注入。
-- 每轮仍先取一次上下文并登记依据（context → 必需人格/更正校验 → reserve → 生成 → turns/used/sent），本轮多次工具调用复用同一份依据；但**只有本轮确有新增背景时**才追加一条来源标记为 `companion-memory` 的消息：开头一句"这是记忆服务补充的材料，不是主人说的话"，之后只含相关记忆条目、必须遵守的更正与必要的跨端近期对话；没有新增就完全不注入，也没有占位句或版本号。
-- 每条增量按稳定指纹（记忆 id + 正文、更正 id + 修订、跨端轮次 id）去重，索引持久化在 `outbox.json` 的 `injected` 里；只有**真的交给模型**的条目才登记，取上下文、reserve 或落盘待提交都不算。原生压缩后开启新的上下文代际，允许重新送达。
-- 每轮自动保存真实用户发言与**最终对外文字**——不是最后一条原始 assistant 消息，而是 bridge 解析控制块后真正发出去的那段。
-- 用户明确说“你记错了”“把这条忘掉”时，模型念 `<改写>旧 ||| 新</改写>` / `<撕掉>那件事</撕掉>`，由程序真的改、真的删（失败如实回报，匹配到多条就退回候选让你确认）；管理台的更正与删除同样影响 QQ 后续回答。
-- 用户明确要求**长期**改变说话或相处方式（“以后别每次都总结了”“你太人机了”）时，模型念 `<学到>主人希望以后一直这样做的事</学到>`，程序把**这一轮那句话**报给记忆服务，由服务端读原文派生表达规则并在下一轮生效——直接生效，不设待确认。只要求这一次简短、或只是评价（“这个 bot 挺好玩”）时不念。学另一个 bot 的表达方式走同一条路，示例必须是一条**已保存消息的引用**，进入记忆的是表达机制而不是他人身份或经历。**客户端只传来源键，规则文本由服务端派生**，所以模型在标签里写什么都不可能被当作规则存进去。失败按原因如实回报（没有教导权限 / 找不到那条存档 / 人格卡刚被改过 / 判定不构成教导 / 服务暂时连不上未落盘）。
-- 断线后补交、重启后恢复；重复消息不重复保存；删除后旧历史、补交与重启都不会把内容带回来。
-- **主会话不上报任何工具，动作改由正文里的「魔法」咒语表达**：`<读取>` / `<生成>` / `<执行>` 动外面的世界，`<翻本子>` / `<改写>` / `<撕掉>` / `<学到>` 动记忆本。这是实测结论而非风格偏好：只要请求里存在 `tools` 字段，`deepseek-v4.1-flash` 的 thinking 就会被拉进 function-calling 规划模式，角色独白退化成“用户问…需不需要调用工具…”的第三人称分析，系统提示压不住；把 `tools` 整个去掉后，同一份人格下 **7/7 稳定输出（…）角色独白**。咒语是纯文本，不触发该语境，能力却保住了。
-- **执行独立于 bridge**：本插件监听已落地的 `assistant/message`，解析标签；`<读取>` 直接读盘，`<生成>`/`<执行>` 创建无 preset 的标准 agent，使用原生工具，结束后以 `source.kind=companion-spell` 的 `followup()` 回填。消息按 session/seq 去重，咒语串行执行；worker 默认 120 秒超时，主会话销毁或超过 5 分钟不再回填。网页保留原始标签与反馈，QQ 出站由 bridge 剥离标签。
-- 在 DSH 网页或桌面直接选择 **QQ 会话预设（`dsh-qq-bridge`）** 即接入咒语链路，无需 bridge 服务或 QQ 绑定。普通工作会话和 worker 不接入。个人记忆的翻本子、更正、删除继续使用原有主人授权，通用咒语不检查 QQ 记忆绑定。
-- `<学咒语>名字 ||| 说明 ||| 读取/生成/执行 ||| 模板</学咒语>` 保存前用“咒语试跑”替换 `{body}` 真实试跑；失败不保存。模板落在插件状态目录 `spells.json`，最多 8 条、名字 2–8 个中文字符，展开一层后进入同一个执行链。无占位符时明确作为固定命令保存；`<忘掉咒语>名字</忘掉咒语>` 删除模板并回填确认。
-- 既有 `companion_task` 保留 TaskStore 与 `subagents.startActivation` 路径；其任务幂等、终态通知与重启收敛继续生效。
-- 已安装的 DSH 工具继续按现有设置使用（在工作会话里）。工具结果按外部来源处理，不会变成用户偏好。
-
-## 一次性配置
-
-### 1. 服务端授权（`companion-runtime/config/stack.toml`）
+在核心的 `stack.toml` 为 DSH 客户端配置：
 
 ```toml
 [clients.dsh-desktop]
 token_env = 'COMPANION_DSH_TOKEN'
 subjects = ['private']
 plugin_id = 'dsh_memory'
-memory_tools = true      # 允许对话内更正/遗忘；关闭则只能用管理台
-persona_teach = true     # 允许主人明确教导表达方式
-memory_outputs = true   # 允许消费主动候选及回报 QQ 输出
-trusted_plugins = ['dsh_memory'] # 与本插件配置 pluginId / source_key 第二段一致
+memory_tools = true
+persona_teach = true
+memory_outputs = true
+trusted_plugins = ['dsh_memory']
 ```
 
-`memory_tools` 与 `host_persona` 是两个独立授权：前者只能动本人的事实，后者只能改人格卡。**本插件不读取管理台凭据，也不给模型管理台权限。**
+`memory_tools` 控制对话内更正与遗忘，`persona_teach` 控制明确教导，`memory_outputs` 控制主动输出与投递回执。`trusted_plugins` 必须与插件配置的 `pluginId` 一致。
 
-`<学到>` 使用独立的 `persona_teach` 能力，并同时校验 `trusted_plugins`、主体与用户消息来源。默认 `pluginId` 是 `dsh_memory`；自定义标识时两端对应修改，不能用 npm 包名代替来源标识。临时要求只影响当前回复，持久教导写入表达段、发布后续轮次采用；核心身份保持冻结。
-
-当前版本渲染状态、经历、成长、工作摘要与表达规则。启用插件后 `proactiveEnabled` 默认开启，可独立关闭。后台轮询只处理 bridge 校验的主人私聊：领取到点候选与固定人格/记忆快照，以 `source.kind=companion-proactive` 唤醒原主会话，生成实际要说的话，再交给 bridge 投递。
-
-普通对话在后台同一次提炼中维护事项，明确约定的回访保留原话时间；用户报进展、完成或取消时更新对应事项。普通跟进仍采用核心的 12 小时间隔及现有时机规则。主动主会话继续省略整个 `tools` 字段，保留第一人称角色表达所用的人格与魔法段；本轮主动搭话只生成正文，具体操作仍由已有咒语工作会话承担。
-
-生成前记录实际消费的记忆引用；生成后及每次 QQ 分段发送前重新检查来源、事项版本与用户插话。`[PASS]` 暂缓该候选，避免每次轮询重复生成。正文和稳定 output ID 先落盘，失败或重启后复用原正文；只有平台接受的分段回报 `/v1/outputs/deliver` 并进入近期对话。平台接收状态不明的分段保持 unknown。
-
-核心接口均需 `memory_outputs` 与身份主体授权，租约绑定 client/session/scene：`POST /v1/proactive/poll` 领取，`use` 登记消费引用，`observe` 记录用户插话，`complete` 保存生成正文，`check` 发送前复查，`release` 释放或暂缓候选。桥接 `qqBridgeEvents.deliverOutput` 复用 `delivery.json`，此类输出由记忆插件复查后补发。
-
-### 2. 令牌
-
-`COMPANION_DSH_TOKEN` 的值在服务首次启动时生成到新运行根的 `state/client_tokens.json`。把它设进 DSH 进程环境，或让插件读该文件：
-
-```yaml
-tokenEnv: COMPANION_DSH_TOKEN
-tokenFile: F:\game\projectNEKO\companion-runtime\state\client_tokens.json
-```
-
-`tokenFile` 只读取 `tokenEnv` 指向的那一个键。凭据不进配置、提示词、日志或源码。
-
-### 3. 安装与启用
-
-通过 DSH 插件管理安装本目录（桌面版使用 desktop profile）。安装包默认 `enabled: false`，**安装不等于接管人格**；在设置里打开 `enabled` 后才连接。
-
-配置字段见 `cordis.patch.yml`。QQ 账号、Admin OpenID、白名单与工具设置仍由 QQ bridge 管理，本插件只读取 bridge **校验过**的结果。
-
-## 与 QQ bridge 的边界
-
-| 部分 | 职责 |
-|---|---|
-| QQ bridge | QQ 登录、主人身份校验、消息收发、控制指令、会话映射、出站标签剥离 |
-| 本插件 | 咒语监听/解析、标准 agent 执行、followup 回填、模板台账，以及原有记忆接入 |
-| DSH | 模型调用、原生会话、已安装工具与工具权限 |
-| companion-memory | 唯一人格卡、发布版本、事实、召回、更正与删除规则 |
-
-bridge 通过 `qqBridgeEvents` 在生成前提供已校验的主人/会话绑定，在生成后发布真实输入、最终可见文字、分段接收结果和稳定消息 id；该服务还提供清理时所需的会话交接。本插件只给绑定的主人私聊注入人格和注册记忆工具，普通 DSH 会话、群聊与非主人不获得个人记忆权限。
-
-本插件据此记录 `sent`（平台接收）。QQ 的个人记忆仍等待主人绑定；网页 QQ 预设的通用咒语独立工作。
-
-## 主会话隔离机制
-
-QQ 主会话的请求合同由 [`main-session.js`](main-session.js) 实施，用的是 rc.3 原生作用域能力，不伪造宿主行为：
-
-| 目标 | 机制 | 为什么是这个 |
-|---|---|---|
-| 人格只一份 | 在 agent 作用域注册同名 `deployment:persona-prefix` 段，并在 `system-prompt/assemble` 里按名字重建 | 同作用域同名段无法用空段覆盖（会报 already registered），组装钩子是唯一能定稿的地方 |
-| 去掉团队/编码段 | 组装钩子只保留完整人格与魔法段 | 按固定段重建，保持顺序和正文来源稳定 |
-| 主会话 0 tools | 组装钩子输出空工具集，`tools.guard()` 拒绝历史工具调用 | 实际操作由独立标准 agent 承担 |
-| 前缀稳定 | 段与工具都按固定名字顺序重建 | 顺序或空白漂移会让缓存前缀整体失效 |
-
-隔离接入网页 QQ 预设与已校验主人私聊；普通工作会话、群聊与非主人不接入。`.scratch/verify-integration.mjs` 使用桌面包内真实 rc.3 模块，在没有 bridge 服务和绑定的环境验证标准 worker、来源回填、模板学习/失败/忘掉，以及卸载后原提示和工具恢复。
-
-## 状态与失败
-
-| 状态 | 含义与下一步 |
-|---|---|
-| `connected` | 已连接，人格与保存正常 |
-| `disconnected` | 服务不可达或忙，轮次进持久队列，自动重试 |
-| `rejected` | 身份/凭据被拒，停下等配置修正（不会盲目重试） |
-| `cleanup-pending` | 有删除待办，补交暂停直到清理确认 |
-| `cleanup-failed` | 本地正文删除失败（常见于文件被占用），待办保留，修复后继续 |
-
-队列有界（`maxPending`），满时明确报错并保留输入，不静默丢弃。停用会停止注入、提交与重试，**保留持久队列**；下次启用按原顺序恢复。
-
-必需人格或更正不可用时，bridge 持久保留输入并阻止模型调用；连接恢复后再处理。生成完成后即使 QQ 部分发送失败，也使用 bridge 的最终可见文字保存；补发只处理失败分段，不重做模型或工具。进程中断的生成和无法判定是否被平台接收的分段保留为 `unknown`，不自动重复执行。发送状态在 DSH home 的 `plugins/dsh-qq-bridge/<账号命名空间>/delivery.json` 中核对。
-
-## 清理
-
-删除待办先停止并释放旧 Agent、清除对应 bridge 队列正文，再删除 `<DSH home>/sessions/<project>/<sessionId>/`（含 `.jsonl` 与 `.jsonl.zstd`），复核后才确认。来源会话及已登记相关记忆/人格版本引用的会话一起清理，后续输入通过 bridge 切到新会话。任何一步失败都保留清理待办。
-
-无关会话、无关队列与别的主体不受影响。
-
-## 开发与验证
-
-包本身零运行时依赖、无需构建；开发只需 Node.js（`engines.node >= 22`），宿主依赖由 DSH 提供（见 `peerDependencies`）。
+### 2. 安装插件
 
 ```bash
-git clone https://github.com/lxl8182/dsh-companion-memory.git
-cd dsh-companion-memory
-
-npm run check          # 对 12 个源文件逐个 node --check（语法/模块自检）
-npm test               # node --test test/*.test.js，82 个用例
-npm pack --dry-run     # 核对发布内容，包内只有 package.json 的 "files" 白名单
+git clone https://github.com/lxl8182/dsh-rin-memory.git
+cd dsh-rin-memory
+npm pack
 ```
 
-安装到本机 DSH：在插件管理里指向本目录（桌面版使用 desktop profile），包内默认 `enabled: false`，装完不会自动接管人格。
+通过 DSH 的插件管理安装本目录或 `local-dsh-rin-memory-0.2.6.tgz`。包默认 `enabled: false`，配置并启用后才连接。插件零运行时依赖、无需构建；宿主依赖由 DSH 提供。
 
-契约级检查在 `.scratch/`（本地验证脚本，已在 `.gitignore` 中，不随仓库与包发布）：
+### 3. 连接核心
 
-```powershell
-# 使用桌面原生 Cordis 和工具注册表，临时服务与合成数据，不发送 QQ 消息
-$memoryCheckElectronMode = $env:ELECTRON_RUN_AS_NODE
-try {
-  $env:ELECTRON_RUN_AS_NODE='1'
-  & 'E:\dsh\desktop\DeepSeek Harness.exe' .scratch/check-fixed-native.cjs
-} finally {
-  $env:ELECTRON_RUN_AS_NODE = $memoryCheckElectronMode
-}
+在插件设置中填写：
+
+```yaml
+enabled: true
+url: http://127.0.0.1:48931
+clientId: dsh-desktop
+characterId: companion
+subject: private
+pluginId: dsh_memory
+tokenEnv: COMPANION_DSH_TOKEN
+proactiveEnabled: true
 ```
 
-隔离联调使用临时核心根与替身 QQ 发送器；桌面加载验收使用实际 rc.3 模块。修改仅限本包与授权 QQ bridge 接入点，安装/更新走 DSH 插件管理，保持静音，不触发真实服务器操作或替换原角色数据。
+令牌可由 DSH 进程环境提供，也可用 `tokenFile` 指向核心运行根的 `state/client_tokens.json`；只读取 `tokenEnv` 对应的键。角色标识要与核心配置一致。QQ 账号和白名单在 bridge 设置中维护。
 
-陪伴/执行角色分工属于后续 Q03，不阻塞本次记忆闭环。
+更改后重启 DSH，在 QQ 发送一条消息即可建立主人会话绑定。也可以在 DSH 网页或桌面选择 `dsh-qq-bridge` 预设使用咒语链路；QQ 个人记忆权限仍由真实主人绑定决定。
+
+## 角色说魔法，工作会话执行
+
+| 咒语 | 用途 |
+|---|---|
+| `<翻本子>` | 查询记忆 |
+| `<改写>` / `<撕掉>` | 更正或删除记忆 |
+| `<学到>` | 提交用户明确的长期教导 |
+| `<读取>` | 读取文件或目录 |
+| `<生成>` / `<执行>` | 把操作交给独立标准 agent |
+| `<学咒语>` / `<忘掉咒语>` | 学习或撤销可复用的咒语模板 |
+
+工作会话使用宿主的原生工具与权限，结果以独立来源回填。网页保留原始咒语与反馈，QQ bridge 在出站时剥离完整咒语标签。长期人格规则由核心依据已保存原话派生，客户端提交来源引用。
+
+## 有缘由地来找你
+
+主动交流使用核心提供的候选与固定人格快照，经 `companion-proactive` 来源唤醒主会话，再交给 bridge 持久投递。普通主动消息默认每天最多 2 次、间隔至少 90 分钟，北京时间 00:00–09:00 静默；明确约定的回访按约定时间处理。
+
+模型可用 `[PASS]` 暂缓候选。生成前后及每次分段投递前会复查来源、事项版本和用户插话；只有平台接受的分段进入近期记忆。关闭 `proactiveEnabled` 即可暂停该消费循环。
+
+## 兼容既有安装
+
+仓库与 npm 包已更名为 `dsh-rin-memory` / `@local/dsh-rin-memory`。升级时通过插件管理替换旧包，并将 bundle 引用改为新包名。
+
+已有配置行 id `dsh-companion-memory`、数据来源 `pluginId: dsh_memory`、消息来源标记和本地状态目录保持兼容，已有授权、记忆来源与补交记录可继续沿用。QQ bridge 使用的 `qqBridgeEvents` 合同保持稳定。
+
+## 开发与文档
+
+```bash
+npm run check
+npm test
+npm pack --dry-run
+```
+
+Node.js 22+；当前 82 项测试。接入与缓存设计见 [PLAN.md](PLAN.md)，咒语执行设计见 [SPELL-PLAN.md](SPELL-PLAN.md)，养成设计与交付状态见核心的 [设计文档](https://github.com/lxl8182/rin-memory/blob/main/docs/companion-growth-design.md) 与 [统一台账](https://github.com/lxl8182/rin-memory/blob/main/docs/roadmap.md)。
+
+## 许可
+
+[Apache-2.0](LICENSE)。
