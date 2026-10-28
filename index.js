@@ -19,7 +19,9 @@ import {
 import { configProblems, normalizeConfig } from './config.js'
 import { randomUUID } from 'node:crypto'
 import { ProactiveRuntime, PROACTIVE_SOURCE } from './proactive.js'
-import { deleteSessionDirectory, listSessionDirectories } from './session-store.js'
+import {
+  SEGMENT_DEFAULTS, SegmentStore, deleteSessionDirectory, listSessionDirectories, renderCarry,
+} from './session-store.js'
 import { MATERIAL_NOTE, MainSessionScope } from './main-session.js'
 import { readSpell, spellToGoal } from './magic-tools.js'
 import { renderFeedback } from './magic.js'
@@ -44,11 +46,30 @@ export { default as Config } from './schema.js'
 /** QQ bridge 发布轮次事实的服务名;缺省时插件只做 DSH 侧注入与保存。 */
 const BRIDGE_EVENTS_SERVICE = 'qqBridgeEvents'
 
+/**
+ * 本插件对外发布的段端口服务名。
+ *
+ * 方向与 `qqBridgeEvents` 相反:那份事实由桥接发布、本插件订阅;分段判定由本
+ * 插件发布、桥接安装到 executor 上。取不到时桥接完全退回原行为。
+ */
+const SEGMENT_POLICY_SERVICE = 'companionSegmentPolicy'
+
 /** 注入消息的来源标记,供去重与“谁是资料”判断使用。 */
 const MEMORY_SOURCE = 'rin-memory'
 
 /** 后台任务结果的来源标记:既不是用户发言,也不是记忆资料。 */
 const TASK_SOURCE = 'companion-task'
+
+/**
+ * 跨段带入历史的来源标记。
+ *
+ * 它既不是主人这一次说的话,也不是记忆材料,更不是后台任务的产物:它是**已经
+ * 发生过的对话**被带进了新的一段。单独一个来源,保存、召回与去重才分得清。
+ */
+const SEGMENT_SOURCE = 'segment-carry'
+
+/** 带入历史前的一句来源说明。只说明「这不是新发言」,不复述内容。 */
+const SEGMENT_CARRY_NOTE = '（下面是换到新的一段时,把之前已经说过的邻近几句带了过来,供你接着聊。这不是主人刚说的话。）'
 
 /**
  * 宿主的人格槽位名。
@@ -139,12 +160,22 @@ async function activate(ctx, options) {
 
   const runtime = new MemoryRuntime(ctx, config, client, logger)
   await runtime.start()
+  // 把分段能力发布成桥接层可直接安装的段端口。
+  //
+  // 走宿主既有的服务出口而不是新增一条私有通道:桥接插件与记忆插件由宿主按
+  // 各自顺序启用,谁先谁后都不确定,所以端口必须能在任意时刻被取到、并且缺了
+  // 也不影响对方 —— 与 `qqBridgeEvents` 的方向正好相反,这里是记忆插件对外
+  // 提供、桥接插件取用。
+  const publishSegment = typeof ctx.provide === 'function'
+    ? ctx.provide(SEGMENT_POLICY_SERVICE, segmentPolicyFor(runtime))
+    : undefined
 
   const timer = setInterval(() => { void runtime.tick() }, Math.max(1000, config.retryIntervalMs))
   timer.unref?.()
 
   return async () => {
     clearInterval(timer)
+    try { publishSegment?.() } catch { /* disposal is best effort */ }
     await runtime.stop()
   }
 }
@@ -215,6 +246,15 @@ class MemoryRuntime {
     this.pendingLearnings = new Map()
     // 工作会话的落脚目录:和插件数据放在一起,不占用 QQ 聊天的 cwd。
     this.workspaceDirectory = join(dirname(this.statusPath), 'workspace')
+    // 上下文分段(RO02-CTX):状态与清理状态放在同一个插件数据目录,因为它记的
+    // 是「哪个 DSH 会话是当前段」—— 与清理同属本地桥接事实。
+    this.segments = new SegmentStore({
+      statePath: join(dirname(this.statusPath), 'segments.json'),
+      limits: config.segment ?? SEGMENT_DEFAULTS,
+      logger,
+    })
+    // 新段第一次请求要带进去的旧话,按 QQ 来源键暂存到真正用掉为止。
+    this.segmentCarry = new Map()
     this.spellLibrary = new SpellLibrary({ statePath: join(dirname(this.statusPath), 'spells.json') })
     this.spellRunner = new SpellRunner({
       logger,
@@ -233,6 +273,8 @@ class MemoryRuntime {
     // here leaves the plugin mounted so the reason stays visible in status
     // instead of the Host silently dropping it.
     await this.probe().catch(() => {})
+    // 段状态必须先于任何一轮打开:换过段却没恢复,下一轮会再换一次、连丢两段。
+    await this.segments.open()
     await this.spellLibrary.open()
     // 工作会话的目录要先存在,否则 agents.create 拿不到有效 cwd。
     await mkdir(this.workspaceDirectory, { recursive: true }).catch(error => {
@@ -920,6 +962,129 @@ class MemoryRuntime {
     return undefined
   }
 
+  // -- 上下文分段(RO02-CTX)-----------------------------------------------
+
+  /**
+   * 换段判定:由桥接层的段端口在**每轮进模型之前**调用一次。
+   *
+   * 桥接层负责「什么时候问」,这里负责「该不该换」;两边都只回答自己知道的那一半。
+   * 这个点是唯一不需要跟投递时序抢时间的窗口:上一轮已经结束、气泡全部发完,
+   * 而下一轮输入还没进来。
+   *
+   * @param {string} sessionKey QQ 来源键。
+   * @param {string} sessionId 换段前这一轮本来要用的 DSH 会话 id(未建会话时为空串)。
+   * @returns {string|undefined} 需要换段时返回原因(写进状态与日志)。
+   */
+  segmentSwitchReason(sessionKey, sessionId) {
+    if (this.stopped || !sessionKey) return undefined
+    const record = this.segments.current(sessionKey)
+    // 还没有段:这不是「换段」,是首次记账。桥接层不需要释放会话。
+    if (!record) return undefined
+    // 宿主换了会话(重启、手工 /new-session、切目录)而我们还记着旧的:直接把段绑到
+    // 新会话上,不算一次换段 —— 否则会把「宿主已经换过」误记成「段该换」并再换一次。
+    if (record.session_id && sessionId && record.session_id !== sessionId) {
+      void this.segments.bind(sessionKey, sessionId).catch(() => {})
+      return undefined
+    }
+    return this.segments.switchReason(sessionKey) ?? undefined
+  }
+
+  /**
+   * 「换段已经发生」:开新段、记住旧会话、把该带走的旧话取出来暂存。
+   *
+   * 旧话在 begin **之前**取:begin 会把本段的完整对话清空,顺序反了就没得带。
+   * 新段同时是新的上下文代际,所以注入索引作废,记忆材料允许重新送达一次。
+   */
+  async onSegmentSwitched(sessionKey, { previousSessionId, sessionId, reason } = {}) {
+    if (this.stopped || !sessionKey) return
+    const carry = this.segments.carry(sessionKey)
+    const text = carry.exchanges.length > 0 ? renderCarry(carry.exchanges) : ''
+    await this.segments.begin(sessionKey, { sessionId, reason })
+    if (text) this.segmentCarry.set(sessionKey, text)
+    if (sessionId) {
+      await this.resetInjected(sessionId).catch(error => {
+        this.logger.warn?.(`[dsh-rin-memory] 换段后注入索引重置失败：${error.message}`)
+      })
+    }
+    this.logger.info?.(`[dsh-rin-memory] 段已换（${reason || 'unknown'}）: ${previousSessionId || '(none)'} -> ${sessionId || '(none)'},带入 ${carry.exchanges.length} 轮`)
+  }
+
+  /** 让段绑定到当前 DSH 会话 id;重启后据此判断宿主是否还在同一会话上。 */
+  async bindSegment(sessionKey, sessionId) {
+    if (this.stopped || !sessionKey) return
+    const record = this.segments.current(sessionKey)
+    if (!record) {
+      await this.segments.begin(sessionKey, { sessionId, reason: 'initial' })
+      return
+    }
+    if (record.session_id !== sessionId) await this.segments.bind(sessionKey, sessionId)
+  }
+
+  /** 取走新段第一次请求要带的旧话;没有则返回空串。取走即清空,只带一次。 */
+  takeSegmentCarry(sessionKey) {
+    const pending = this.segmentCarry.get(sessionKey)
+    if (pending === undefined) return ''
+    this.segmentCarry.delete(sessionKey)
+    return pending
+  }
+
+  /**
+   * 记一次完整交换,作为未来换段时可能带入的历史。
+   *
+   * 只在**发送成功之后**记(bridge 报的 completed 轮次带真实 parts):没发出去的那
+   * 一轮不该变成下一段带入的历史,否则新段会读到模型从未见过、主人也从未收到的
+   * 话。主动消息与后台任务同样不是「真实用户互动」,也不进这里。
+   */
+  async recordSegmentExchange(report) {
+    const sessionKey = report?.sessionKey
+    if (this.stopped || !sessionKey) return
+    const parts = Array.isArray(report.parts) ? report.parts : []
+    if (parts.length > 0 && !parts.some(part => part.ok)) return
+    await this.segments.recordExchange(sessionKey, { user: report.input, reply: report.reply })
+  }
+
+  /**
+   * 跨段时按需取一张续聊便条;不需要、或服务还没提供这条路由时返回空串。
+   *
+   * 判定与正文都由核心服务的 domain 规则给出(`build_segment_note`):它只记录
+   * **引用**(哪些未完事项、哪个时间、来源键),正文永远回原始记录取,所以更正
+   * 或删除之后便条不会把旧结论带回来,也不存在「摘要压摘要」。
+   *
+   * 默认不生成:时距不足、没有未完结事项时服务返回空,这里如实为空串,不补话。
+   * 不是常规摘要调用:只在换段那一次问,不是每轮都问。
+   *
+   * 服务没有这条路由(404/405)、或请求失败时同样降级为空:少一句话远好过让
+   * 换段本身失败。
+   */
+  async segmentNoteFor(sessionKey, sessionId) {
+    if (this.stopped || !sessionKey || !sessionId) return ''
+    const record = this.segments.current(sessionKey)
+    if (!record) return ''
+    try {
+      const note = await this.client.request('/v1/segment/note', {
+        ...this.client.scope(sessionId),
+        switched_at: new Date(Number(record.started_at) || Date.now()).toISOString(),
+        last_user_at: new Date(Number(record.last_user_at) || Number(record.started_at) || Date.now()).toISOString(),
+      })
+      return typeof note?.text === 'string' ? note.text.trim() : ''
+    } catch (error) {
+      const status = Number(error?.status ?? 0)
+      if (status === 404 || status === 405) {
+        // 服务端还没提供这条路由:便条本来就是可选的,不重复告警。
+        return ''
+      }
+      this.logger.warn?.(`[dsh-rin-memory] 续聊便条未取到（不影响本轮）:${error?.message ?? error?.code}`)
+      return ''
+    }
+  }
+
+  /** 一个 agent 属于哪个 QQ 来源键;只从桥接绑定读,不猜。 */
+  sessionKeyOfAgent(agent) {
+    const sessionId = agent?.session?.id
+    if (!sessionId) return undefined
+    return this.bridge?.binding?.(sessionId)?.sessionKey
+  }
+
   // -- DSH agent attach ------------------------------------------------
 
   attach(agent) {
@@ -1126,6 +1291,34 @@ class MemoryRuntime {
         this.logger.warn?.(`[dsh-rin-memory] 任务通知标记失败：${error.message}`)
       })
     }
+    // ---- 新段的第一次请求:干净输入(RO02-CTX)-------------------------
+    // 换段的意义就是让这一轮只读「已发布人格 + 固定咒语说明 + 带入历史 +
+    // 记忆/便条 + 当前原话与图片」。正式请求会从会话日志组装历史,所以只改
+    // pre-step 的消息数组达不成这件事 —— 真正起作用的是换了一个空会话。
+    // 这里补的是新会话里**没有**的那部分:跨段带入的旧话。
+    //
+    // 必须排除的东西:
+    // - 原生压缩摘要:新会话日志里本来就没有(压缩节点属于旧会话),不必也无法在此剥离;
+    // - 旧运行说明与后台执行过程:同样只在旧会话里,换段即离开;
+    // - 本插件自己的记忆材料:照常只给本轮增量,已注入索引在换段时作废。
+    //
+    // 带入的历史作为一条**有来源标记**的消息放在主人原话之前:它是「已经发生过的
+    // 对话」,不是主人这次说的话,来源标记让保存与召回都分得清。
+    const carryKey = this.sessionKeyOfAgent(agent)
+    const carryText = carryKey ? this.takeSegmentCarry(carryKey) : ''
+    if (carryText) {
+      const materialInput = messages.findLastIndex(message =>
+        message.source?.kind === 'user' || message.source?.kind === PROACTIVE_SOURCE)
+      const carry = {
+        id: `segment-carry:${carryKey}`,
+        role: 'user',
+        source: { kind: SEGMENT_SOURCE },
+        content: [{ type: 'text', text: `${SEGMENT_CARRY_NOTE}\n${carryText}` }],
+      }
+      messages.splice(Math.max(0, materialInput), 0, carry)
+      // 带入过的旧话已经由本轮的记忆材料与它自己承载,不必再在下一轮重贴;
+      // 但它不属于「已注入的记忆指纹」,所以不进注入索引。
+    }
     if (!prepared.background) {
       return messages.length > decision.messages.length ? { ...decision, messages } : decision
     }
@@ -1203,6 +1396,19 @@ class MemoryRuntime {
     }
     const binding = this.bridge.binding(sessionId)
     input.text = binding.input
+    // 空闲计时只认真实用户互动:主动消息、后台任务与咒语反馈都不走这里。
+    const segmentKey = binding.sessionKey
+    if (segmentKey) {
+      try {
+        // 先建段再记时间:顺序反了的话,首次互动会落在「还没有段」的空态上,
+        // 于是这一轮既不记账也不落盘,重启后本轮互动就丢了。
+        await this.bindSegment(segmentKey, sessionId)
+        await this.segments.touchUser(segmentKey)
+      } catch (error) {
+        // 段状态是本地簿记,坏了不该拦住主人的这一轮。
+        this.logger.warn?.(`[dsh-rin-memory] 段状态记录失败（不影响本轮）：${error.message}`)
+      }
+    }
     // The turn key is the DSH user-message id alone, so the bridge can compute
     // the same key for its send receipt without knowing this turn number.
     const requestId = turnKeyOf({ sessionId, messageId: input.messageId })
@@ -1479,6 +1685,13 @@ class MemoryRuntime {
     } catch (error) {
       this.logger.warn?.(`[dsh-rin-memory] 发送回执未记录：${error.message}`)
     }
+    // 这一段交换已经真的发到主人面前了,可以是未来换段时带入的历史。
+    // 记在发送之后而不是生成时:没发出去的话不该进入新段的带入。
+    try {
+      await this.recordSegmentExchange(report)
+    } catch (error) {
+      this.logger.warn?.(`[dsh-rin-memory] 段历史记录失败：${error.message}`)
+    }
   }
 
   // -- memory tools ----------------------------------------------------
@@ -1702,6 +1915,56 @@ function toolDefinition({ name, description, parameters, required = [], run, run
   }
 }
 
+
+/**
+ * 把本插件的分段能力包装成桥接层可以直接安装的段端口。
+ *
+ * 桥接层(DshAgentExecutor)只要求两个问句:`shouldStartNewSegment` 与
+ * `carryOverText`。这里负责把它们接到本插件的段状态上,并保证:
+ *
+ * - **不需要换段时什么都不做**:判定返回 undefined,桥接层不会释放会话;
+ * - **换段通知是唯一带旧话的时机**:在 `carryOverText` 里开新段、暂存旧话;
+ *   旧话随后由本插件在那一轮的 pre-step 里作为有来源标记的消息投给模型,
+ *   桥接层不替模型组织这段话;
+ * - **缺任何一环都降级**:判定失败保持原会话,通知失败只少几句旧话。
+ *
+ * @param {object} runtime 本插件的运行时实例(由 activate 装配)。
+ * @returns {{ shouldStartNewSegment: Function, carryOverText: Function } | undefined}
+ *   运行时不可用时返回 undefined,桥接层据此完全退回原行为。
+ */
+export function segmentPolicyFor(runtime) {
+  if (!runtime?.segments) return undefined
+  return {
+    /**
+     * 当前段的只读快照,供状态页与排障使用。
+     *
+     * 只报事实,不改任何东西:哪个段、绑在哪个 DSH 会话、累计多少 token、
+     * 最后一次真实互动在什么时候。桥接层不依赖它。
+     */
+    describe(sessionKey) {
+      const record = runtime.segments.current(sessionKey)
+      if (!record) return undefined
+      return {
+        segment_id: record.segment_id,
+        session_id: record.session_id,
+        previous_session_id: record.previous_session_id,
+        reason: record.reason,
+        started_at: record.started_at,
+        last_user_at: record.last_user_at,
+        tokens: record.tokens,
+        exchanges: record.exchanges.length,
+      }
+    },
+    /** 每轮进模型前问一次:该不该换,以及为什么。 */
+    shouldStartNewSegment(sessionKey, sessionId) {
+      return runtime.segmentSwitchReason(sessionKey, sessionId)
+    },
+    /** 换段已发生:开新段并记下要带进新会话的旧话。 */
+    async carryOverText(sessionKey, previousSessionId, sessionId) {
+      await runtime.onSegmentSwitched(sessionKey, { previousSessionId, sessionId, reason: 'policy' })
+    },
+  }
+}
 
 /**
  * 一轮的稳定键。

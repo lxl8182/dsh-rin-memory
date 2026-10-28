@@ -73,6 +73,22 @@ const Config = Schema.object({
   retireSessionsOnCleanup: Schema.boolean()
     .default(true)
     .description('清理时退役命中的旧会话；正文删除仍会先执行。'),
+  segment: Schema.object({
+    budgetTokens: Schema.number().step(1).min(1000).default(128000)
+      .description('软上限：本段累计输入达到它就在本轮结束后换段。'),
+    hardTokens: Schema.number().step(1).min(1000).default(160000)
+      .description('硬上限：防单条超长文本或大图冲破预算，绕开最少轮数。'),
+    carryTurns: Schema.number().step(1).min(0).default(30)
+      .description('新段带入的最近完整对话轮数。'),
+    carryTokens: Schema.number().step(1).min(0).default(8000)
+      .description('带入正文的上限，与轮数取先到。'),
+    idleHours: Schema.number().step(1).min(1).default(24)
+      .description('无真实用户互动满这么多小时就换段。'),
+    minTurns: Schema.number().step(1).min(0).default(6)
+      .description('少于此轮数不换段，防抖动。'),
+    maxAgeDays: Schema.number().step(1).min(1).default(14)
+      .description('段龄上限，仅在空闲时生效。'),
+  }).description('上下文分段参数；换段即归档旧会话并开新会话，绕开原生压缩。'),
 }).volatile()
 
 export default Config

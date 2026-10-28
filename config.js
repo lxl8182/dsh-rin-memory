@@ -9,6 +9,8 @@
  * 受限的 `client_tokens.json`。密钥本身不进配置、提示词、日志或源码。
  */
 
+import { SEGMENT_DEFAULTS } from './session-store.js'
+
 /**
  * @typedef {object} MemoryPluginConfig
  * @property {boolean} enabled 总开关。默认关闭:安装不等于启用。
@@ -28,6 +30,7 @@
  * @property {number} maxPending 补交队列上限;满时明确报错而不是丢轮次。
  * @property {number} retryIntervalMs 后台补交与清理轮询间隔。
  * @property {boolean} retireSessionsOnCleanup 清理待办存在时是否退役旧 DSH 会话。
+ * @property {object} segment 上下文分段的参数(RO02-CTX);见 `segment` 默认值。
  */
 
 /** @type {MemoryPluginConfig} */
@@ -49,6 +52,10 @@ export const DEFAULT_CONFIG = {
   maxPending: 256,
   retryIntervalMs: 15000,
   retireSessionsOnCleanup: true,
+  // 上下文分段(RO02-CTX)。参数与 stack.toml 的 [segment] 一一对应,不做设置页:
+  // 这些是行为上限而不是口味偏好,改它们等于改「一次请求能塞多少」,应当在配置
+  // 文件里改并留痕。
+  segment: { ...SEGMENT_DEFAULTS },
 }
 
 const BOOLEAN_FIELDS = ['enabled', 'memoryTools', 'retireSessionsOnCleanup', 'proactiveEnabled']
@@ -95,7 +102,47 @@ export function normalizeConfig(options) {
   if (!Array.isArray(config.sessionPrefixes) || config.sessionPrefixes.length === 0) {
     config.sessionPrefixes = [...DEFAULT_CONFIG.sessionPrefixes]
   }
+  config.segment = normalizeSegment(raw.segment)
   return config
+}
+
+/** 分段参数的合法范围。越界回落默认值,不让一个写错的数字决定请求上限。 */
+const SEGMENT_FIELDS = {
+  budgetTokens: { minimum: 1000, integer: true },
+  hardTokens: { minimum: 1000, integer: true },
+  carryTurns: { minimum: 0, integer: true },
+  carryTokens: { minimum: 0, integer: true },
+  idleHours: { minimum: 1, integer: true },
+  minTurns: { minimum: 0, integer: true },
+  maxAgeDays: { minimum: 1, integer: true },
+}
+
+/**
+ * 收敛分段参数。
+ *
+ * 两条跨字段约束单独处理,因为它们在语义上是**错的**,不是「值不好看」:
+ * - `hardTokens` 必须大于 `budgetTokens`,否则软上限永远先到、硬上限形同虚设;
+ * - `carryTokens` 不能超过新段的可用预算,否则新段首次请求自带超限。
+ * 违反时把冲突项拉回默认值,而不是让插件带着互相矛盾的上限运行。
+ *
+ * @param {unknown} value 外部传入的分段参数。
+ * @returns {object} 自洽的分段参数。
+ */
+export function normalizeSegment(value) {
+  const raw = (typeof value === 'object' && value !== null ? value : {})
+  const segment = { ...SEGMENT_DEFAULTS }
+  for (const [field, rule] of Object.entries(SEGMENT_FIELDS)) {
+    const candidate = raw[field]
+    if (typeof candidate !== 'number' || !Number.isFinite(candidate) || candidate < rule.minimum) continue
+    segment[field] = rule.integer ? Math.floor(candidate) : candidate
+  }
+  if (segment.hardTokens <= segment.budgetTokens) {
+    segment.hardTokens = Math.max(SEGMENT_DEFAULTS.hardTokens, segment.budgetTokens + 1)
+  }
+  if (segment.carryTokens >= segment.budgetTokens) {
+    segment.carryTokens = SEGMENT_DEFAULTS.carryTokens
+  }
+  return segment
 }
 
 /**

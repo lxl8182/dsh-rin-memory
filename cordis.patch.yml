@@ -33,3 +33,12 @@
         maxPending: 256
         retryIntervalMs: 15000
         retireSessionsOnCleanup: true
+        # 上下文分段(RO02-CTX)：换段即归档旧会话、开新会话，不压缩原文。
+        segment:
+          budgetTokens: 128000
+          hardTokens: 160000
+          carryTurns: 30
+          carryTokens: 8000
+          idleHours: 24
+          minTurns: 6
+          maxAgeDays: 14
