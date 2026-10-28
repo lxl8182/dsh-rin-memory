@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { ProactiveRuntime } from '../proactive.js'
 import { contactControls, parseContact } from '../contact.js'
 import { parseSpells } from '../magic.js'
+import { sessionScopeId } from '../memory-client.js'
 
 function harness({ state = { proactiveOutputs: {} }, sessionId = 'qq-test', outputs = new Map(), partial = false } = {}) {
   let now = '2026-10-29T04:00:00Z', first = partial, valid = true, turn = 0
@@ -86,6 +87,21 @@ function harness({ state = { proactiveOutputs: {} }, sessionId = 'qq-test', outp
   return { runtime, context, agent, calls, sent, followups, outputs, barriers, complete,
     advance: ms => { now = new Date(Date.parse(now) + ms).toISOString() }, invalidate: () => { valid = false } }
 }
+
+test('chat clocks are sparse, refresh at midnight, and proactive clocks stay current', () => {
+  const { runtime, agent, advance } = harness()
+  const proactive = new ProactiveRuntime(runtime), scope = sessionScopeId(agent.session.id)
+  const first = runtime.client.now()
+  assert.match(proactive.chatClockMaterial(agent.session.id), /2026-10-29 12:00/)
+  runtime.client.state.injected = { [scope]: { 'clock:previous': first } }
+  advance(60000)
+  assert.equal(proactive.chatClockMaterial(agent.session.id), '')
+  assert.match(proactive.clockMaterial(agent.session.id), /12:01/)
+  advance(59 * 60000)
+  assert.match(proactive.chatClockMaterial(agent.session.id), /13:00/)
+  runtime.client.state.injected[scope] = { 'clock:night': '2026-10-29T15:59:00Z' }
+  assert.match(proactive.chatClockMaterial(agent.session.id, '2026-10-29T16:01:00Z'), /2026-10-30 00:01/)
+})
 
 test('contact tags are private, time-zone anchored, idempotent and never ordinary spells', async () => {
   assert.equal(parseContact('明天20:30｜面试', { now: '2026-10-29T23:00:00Z', timezone: 'Asia/Shanghai' })

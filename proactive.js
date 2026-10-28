@@ -51,6 +51,15 @@ export class ProactiveRuntime {
       + (plan?.status === 'scheduled' ? `\n我先前记下的联系安排：${plan.intent || '到时再看看'}；`
         + (plan.next_contact_at ? localClock(plan.next_contact_at, plan.timezone).display : plan.mode) : '')
   }
+  chatClockMaterial(sessionId, now = this.now()) {
+    const seen = this.runtime.client.state.injected?.[sessionScopeId(sessionId)] ?? {}
+    const last = Object.entries(seen).filter(([key]) => key.startsWith('clock:'))
+      .reduce((latest, [, at]) => Math.max(latest, Date.parse(at) || 0), 0)
+    // 普通聊天不逐分钟追加时钟；跨日立即更新，其余最多每小时更新一次。
+    if (last && Date.parse(now) - last < 3600000
+      && localClock(last, this.config.timezone).date === localClock(now, this.config.timezone).date) return ''
+    return this.clockMaterial(sessionId, now)
+  }
   event(session, event) {
     if (event.type === 'turn/start') this.busy.add(session.id)
     if (event.type === 'assistant/message' && !event.data?.interrupted) {

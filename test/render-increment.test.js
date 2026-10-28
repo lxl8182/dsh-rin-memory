@@ -270,7 +270,6 @@ test('narrative projection changes viewpoint while preserving quotes, raw facts 
 
 test('G20: a turn with nothing new adds no message at all', async () => {
   const { runtime } = runtimeWith(context())
-  runtime.config.proactiveEnabled = false
   const agent = { session: { id: 'qq-g20b', header: {} }, options: {}, followup() {} }
   const first = await runtime.preStep(
     agent, { turn: 1, step: 1, messages: [userMessage('m1', '你好')] },
@@ -278,6 +277,7 @@ test('G20: a turn with nothing new adds no message at all', async () => {
   )
   assert.equal(first.messages.length, 2)
   // 第二轮:同一份材料,已经交付过 → 不追加任何消息。
+  runtime.client.now = () => '2026-10-27T12:01:00.000Z'
   const second = await runtime.preStep(
     agent, { turn: 2, step: 1, messages: [userMessage('m2', '换个话题')] },
     async () => ({ kind: 'enter', messages: [userMessage('m2', '换个话题')] }),

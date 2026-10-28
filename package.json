@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-rin-memory",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "铃芽 RIN 的 DSH 接入端：人格、长期记忆、明确教导与主动交流，保留零工具角色主会话。",

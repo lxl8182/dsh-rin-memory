@@ -1450,9 +1450,9 @@ class MemoryRuntime {
       const contactNow = this.client.now()
       this.contactTimes.set(sessionId, contactNow)
       if (this.config.proactiveEnabled) {
-        const clock = this.proactive.clockMaterial(sessionId, contactNow)
+        const clock = this.proactive.chatClockMaterial(sessionId, contactNow)
         const fingerprint = 'clock:' + stableHash(clock)
-        if (!this.client.state.injected[sessionScopeId(sessionId)]?.[fingerprint]) {
+        if (clock && !this.client.state.injected[sessionScopeId(sessionId)]?.[fingerprint]) {
           background.text = [background.text, clock].filter(Boolean).join('\n\n')
           background.fingerprints.push(fingerprint)
         }
