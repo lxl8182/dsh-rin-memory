@@ -3,12 +3,6 @@ import { parseSpells } from './magic.js'
 
 export const PROACTIVE_SOURCE = 'companion-proactive'
 
-function textOf(message) {
-  const content = message?.content
-  if (typeof content === 'string') return content
-  return (content ?? []).filter(part => part.type === 'text').map(part => part.text ?? '').join('')
-}
-
 export class ProactiveRuntime {
   constructor(runtime) {
     this.runtime = runtime
@@ -19,8 +13,6 @@ export class ProactiveRuntime {
   }
 
   async observe(input) {
-    const run = this.active.get(input.sessionId)
-    if (run) run.cancelled = true
     if (!this.runtime.config.proactiveEnabled || !this.runtime.bridge?.deliverOutput) return
     try {
       await this.runtime.client.request('/v1/proactive/observe', {
@@ -42,7 +34,10 @@ export class ProactiveRuntime {
     const finish = async () => {
       try { await this.finish(session, event, run) }
       catch (error) { this.runtime.logger.warn?.('[dsh-rin-memory] 主动输出待恢复：' + error.message) }
-      finally { if (this.active.get(session.id) === run) this.active.delete(session.id) }
+      finally {
+        run.finishOutput?.()
+        if (this.active.get(session.id) === run) this.active.delete(session.id)
+      }
     }
     this.tail = this.tail.then(finish)
   }
@@ -50,7 +45,6 @@ export class ProactiveRuntime {
   async prepare(agent, payload) {
     const run = this.active.get(agent.session.id)
     if (!run) return undefined
-    if (run.cancelled) return undefined
     run.turn = payload.turn
     await this.runtime.client.request('/v1/proactive/use', {
       ...this.runtime.client.scope(agent.session.id), candidate_id: run.candidate_id,
@@ -99,16 +93,20 @@ export class ProactiveRuntime {
         })
         if (result.status !== 'ready') continue
         const { candidate, context } = result
-        const run = { ...candidate, context, request_id, sessionId, cancelled: false }
+        const run = { ...candidate, context, request_id, sessionId, finishOutput: runtime.bridge.beginOutput(sessionId) }
         runtime.personas.set(sessionId, context.persona)
         this.active.set(sessionId, run)
-        agent.followup({
+        try { agent.followup({
           id: request_id, role: 'user', source: { kind: PROACTIVE_SOURCE },
           content: [{ type: 'text', text:
             '这是一条后台送来的主动搭话机会，不是主人新发言。结合当前人格和交流背景，自然地找主人聊。\n'
             + '想聊的内容：' + candidate.text + '\n缘由：' + (candidate.why ?? '')
             + '\n如果眼下不值得说就只回复 [PASS]。否则只写准备发给主人的话，本轮不念魔法。' }],
-        })
+        }) } catch (error) {
+          run.finishOutput()
+          this.active.delete(sessionId)
+          throw error
+        }
         break
       }
     } catch (error) {
@@ -127,8 +125,8 @@ export class ProactiveRuntime {
   async finish(session, event, run) {
     const runtime = this.runtime
     if (runtime.stopped) return
-    if (run.cancelled || event.data?.reason?.kind !== 'completed') {
-      if (!run.cancelled) this.retryAt = Date.now() + 60000
+    if (event.data?.reason?.kind !== 'completed') {
+      this.retryAt = Date.now() + 60000
       await this.release(run)
       return
     }
@@ -138,27 +136,23 @@ export class ProactiveRuntime {
       && row.type === 'turn/end' && row.data?.turn === event.data.turn)
     const messages = start < 0 ? [] : events.slice(start, end < 0 ? undefined : end + 1)
       .filter(row => row.type === 'assistant/message' && !row.data?.interrupted)
-    let text = textOf(messages.at(-1)?.data?.message).trim()
+    let text = runtime.bridge.assistantText(messages).trim()
     const parsed = parseSpells(text)
     if (!text || text === '[PASS]' || parsed.casts.length) {
       await this.release(run, 'model_pass')
       return
     }
-    text = runtime.bridge.normalizeOutput?.(text) ?? parsed.visible
+    const plan = runtime.bridge.planOutput(text)
+    text = plan.text
     if (!text.trim()) { await this.release(run, 'model_pass'); return }
     const scope = runtime.client.scope(session.id)
     const body = { ...scope, candidate_id: run.candidate_id, lease_id: run.lease_id,
-      context_receipt_id: run.context.context_receipt_id, text }
+      context_receipt_id: run.context.context_receipt_id, text, part_sizes: plan.part_sizes }
     // Persist before the completion POST: a lost response replays the same body.
     await runtime.client.serial(async () => {
       runtime.client.state.proactiveOutputs[run.request_id] = { scope, sessionId: session.id, body }
       await runtime.client.save()
     })
-    if (run.cancelled) {
-      await this.release(run)
-      await this.remove(run.request_id)
-      return
-    }
     await this.deliver(run.request_id)
   }
 
@@ -204,7 +198,6 @@ export class ProactiveRuntime {
     const parts = record.pending_parts ?? []
     if (!parts.length) { await this.remove(id); return }
     const delivered = await runtime.bridge.deliverOutput(pending.sessionId, pending.output_id, parts, async () => {
-      if (this.active.get(pending.sessionId)?.cancelled) return false
       const verdict = await runtime.client.request('/v1/proactive/check', pending.body)
       return verdict.ok === true
     })
@@ -213,6 +206,9 @@ export class ProactiveRuntime {
     if (accepted.length) await runtime.client.request('/v1/outputs/deliver', {
       ...pending.scope, output_id: pending.output_id, kind: 'sent',
       parts: accepted.map(part => ({ index: part.index, platform_id: part.platformId })),
+    })
+    if (delivered.status === 'cancelled') await runtime.client.request('/v1/outputs/deliver', {
+      ...pending.scope, output_id: pending.output_id, kind: 'interrupted', parts: [], reason: 'output_no_longer_valid',
     })
     if (delivered.status === 'completed' || delivered.status === 'cancelled') await this.remove(id)
   }

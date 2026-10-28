@@ -675,7 +675,7 @@ class MemoryRuntime {
 
   async stop() {
     this.stopped = true
-    for (const run of this.proactive.active.values()) run.cancelled = true
+    for (const run of this.proactive.active.values()) run.finishOutput?.()
     this.pendingLearnings.clear()
     await this.spellRunner.dispose()
     await this.bridgeSubscription?.dispose?.()
@@ -2138,6 +2138,8 @@ export function narrativeMemoryText(text) {
     .map((part, index) => index % 2 ? part : part
       .replace(/^(\s*(?:[-•]\s*)?)用户(?=[\p{Script=Han}:：，。\s])/gmu, '$1主人')
       .replace(/^(\s*(?:[-•]\s*)?)助手(?=[\p{Script=Han}:：，。\s])/gmu, '$1我')
+      .replace(/((?:其他|其它|别的|另一个|另一位)\s*)?助手的/gu,
+        (phrase, other) => other ? phrase : '我的')
       .replace(/(为|给|向|让|请|希望|要求|告诉)助手(?=[\p{Script=Han}，。\s])/gu, '$1我'))
     .join('')
 }

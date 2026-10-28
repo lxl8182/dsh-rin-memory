@@ -254,6 +254,8 @@ test('G20: state / episode / growth fragments really land in the final message l
 test('narrative projection changes viewpoint while preserving quotes, raw facts and recent speech', () => {
   assert.equal(narrativeMemoryText('用户已经为助手提供了服务器。\n助手很开心。\n用户说：“助手很乖。”'),
     '主人已经为我提供了服务器。\n我很开心。\n主人说：“助手很乖。”')
+  assert.equal(narrativeMemoryText('用户保存有助手的照片，也记得助手的生日。\n用户说：“助手的照片。”\n用户喜欢另一个助手的声音。'),
+    '主人保存有我的照片，也记得我的生日。\n主人说：“助手的照片。”\n主人喜欢另一个助手的声音。')
   const raw = '用户希望助手陪自己看电影。'
   const source = { context: { block: raw }, recent_turns: [
     { type: 'human', data: { content: '我想给助手起个名字' } },

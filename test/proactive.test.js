@@ -20,6 +20,14 @@ function harness() {
         return { ok: true }
       } },
     bridge: { binding: () => ({ owner: true, scope: 'private' }),
+      assistantText(events) {
+        return events.map(row => (row.data?.message?.content ?? []).filter(block => block.type === 'text')
+          .map(block => block.text).join('')).join('\n')
+      },
+      planOutput(text) {
+        const body = text.trim()
+        return { text: body, part_sizes: body.match(/[^\n]+\n?/g).map(part => Array.from(part).length) }
+      },
       async deliverOutput(session, output, parts, canSend) {
         if (!await canSend()) return { status: 'cancelled', parts: [] }
         sent.push({ session, output })
@@ -38,11 +46,14 @@ test('completion survives restart; only successful platform parts enter memory',
   const run = { candidate_id: 'c1', lease_id: 'l1', context: { context_receipt_id: 'ctx' }, request_id: 'r1' }
   const session = { id: 'qq-test', snapshotEvents: () => [
     { type: 'turn/start', data: { turn: 2 } },
-    { type: 'assistant/message', data: { message: { content: [{ type: 'reasoning', text: 'private' }, { type: 'text', text: '你好，面试怎么样了' }] } } },
+    { type: 'assistant/message', data: { message: { id: 'a1', content: [{ type: 'reasoning', text: 'private' }, { type: 'text', text: '你好' }] } } },
+    { type: 'assistant/message', data: { message: { id: 'a2', content: [{ type: 'text', text: '🐈面试怎么样了' }] } } },
     { type: 'turn/end', data: { turn: 2 } },
   ] }
   await p.finish(session, { data: { turn: 2, reason: { kind: 'completed' } } }, run)
   assert.equal(calls.filter(c => c.path.endsWith('/complete')).length, 1)
+  assert.equal(calls.find(c => c.path.endsWith('/complete')).body.text, '你好\n🐈面试怎么样了')
+  assert.deepEqual(calls.find(c => c.path.endsWith('/complete')).body.part_sizes, [3, 7])
   assert.deepEqual(calls.find(c => c.path.endsWith('/deliver')).body.parts, [{ index: 0, platform_id: 'qq-0' }])
   assert.equal(runtime.client.state.proactiveOutputs.r1.output_id, 'out-1')
   await new ProactiveRuntime(runtime).resume()
@@ -57,20 +68,23 @@ test('completion survives restart; only successful platform parts enter memory',
   assert.equal(calls.filter(call => call.path.endsWith('/release')).at(-1).body.reason, 'model_pass')
 })
 
-test('human input cancels generation and persisted unsent output', async () => {
+test('human input keeps the proactive turn; invalid sources still stop persisted output', async () => {
   const { runtime, calls, sent, setChecks } = harness()
   const p = new ProactiveRuntime(runtime)
-  const run = { candidate_id: 'c', lease_id: 'l', request_id: 'r' }
+  const run = { candidate_id: 'c', lease_id: 'l', request_id: 'r', context: { context_receipt_id: 'ctx' } }
   p.active.set('qq-test', run)
   await p.observe({ sessionId: 'qq-test', messageId: 'human-2', input: '先聊点别的' })
-  assert.equal(run.cancelled, true)
-  await p.finish({ id: 'qq-test' }, { data: { reason: { kind: 'completed' } } }, run)
-  assert.ok(calls.some(c => c.path.endsWith('/release')))
-  assert.equal(calls.some(c => c.path.endsWith('/complete')), false)
+  await p.finish({ id: 'qq-test', snapshotEvents: () => [
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '我把这句说完' }] } } },
+    { type: 'turn/end', data: { turn: 1 } },
+  ] }, { data: { turn: 1, reason: { kind: 'completed' } } }, run)
+  assert.ok(calls.some(c => c.path.endsWith('/complete')))
+  assert.equal(sent.length, 1)
   p.active.clear()
   runtime.client.state.proactiveOutputs.r = { sessionId: 'qq-test', scope: {}, body: {}, output_id: 'out' }
   setChecks(false)
   await p.resume()
-  assert.equal(sent.length, 0)
+  assert.equal(sent.length, 1)
   assert.deepEqual(runtime.client.state.proactiveOutputs, {})
 })
