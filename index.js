@@ -14,7 +14,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import {
   MemoryClient, buildSourceKey, charCount, classifyTransportError, messageText,
-  sessionScopeId, stableHash,
+  sessionScopeId, stableHash, contextReferences,
 } from './memory-client.js'
 import { configProblems, normalizeConfig } from './config.js'
 import { randomUUID } from 'node:crypto'
@@ -237,6 +237,8 @@ class MemoryRuntime {
     // 每个会话在系统段里使用的人格正文:装配时由 provider 读取,所以这里只保存
     // 最近一次真实采用过的已发布全文。空串时该段被宿主丢弃(不会渲染成空块)。
     this.personas = new Map()
+    this.contactTimes = new Map()
+    this.contactSources = new Map()
     // 任务台账:只记"派发过什么、到哪一步、通知过没有"。执行在原生后台会话。
     this.taskStore = null
     this.taskTools = null
@@ -418,9 +420,7 @@ class MemoryRuntime {
     } catch (cause) {
       this.logger.warn?.("[dsh-rin-memory] 学咒语回填失败:" + (cause?.message ?? cause))
     }
-    // 主会话已经走开:结果不能就这么没了,改推 QQ。
-    const push = this.bridge?.pushPrivate?.(text)
-    if (push) await push.catch(cause => this.logger.warn?.("[dsh-rin-memory] 学咒语推送失败:" + (cause?.message ?? cause)))
+    await this.proactive.offerTaskResult(agent.session.id, text)
   }
 
   /**
@@ -634,12 +634,7 @@ class MemoryRuntime {
    */
   async pushSpellResults(agent, results) {
     const text = results.map(result => renderFeedback(result.cast, result)).join('\n\n')
-    const push = this.bridge?.pushPrivate?.(text)
-    if (!push) {
-      this.logger.warn?.(`[dsh-rin-memory] 咒语已结束但无人可回填(会话 ${agent?.session?.id ?? '?'})：${text.slice(0, 120)}`)
-      return
-    }
-    await push
+    await this.proactive.offerTaskResult(agent.session.id, text)
   }
 
   /**
@@ -716,6 +711,7 @@ class MemoryRuntime {
   }
 
   async stop() {
+    this.proactive.stop()
     this.stopped = true
     for (const run of this.proactive.active.values()) run.finishOutput?.()
     this.pendingLearnings.clear()
@@ -740,6 +736,7 @@ class MemoryRuntime {
     // The queue stays on disk: the next enable resumes from the same place.
     await this.ticking?.catch(() => {})
     await Promise.allSettled([...this.bridgeTails.values()])
+    await this.proactive.tail.catch(() => {})
     await this.client.tail.catch(() => {})
   }
 
@@ -819,6 +816,7 @@ class MemoryRuntime {
     const failed = []
     let cleanedCount = 0
     for (const item of pending) {
+      await this.proactive.forget(item)
       const sessions = this.sessionsForDeletion(item)
       const cleaned = []
       const problems = []
@@ -997,9 +995,10 @@ class MemoryRuntime {
    */
   async onSegmentSwitched(sessionKey, { previousSessionId, sessionId, reason } = {}) {
     if (this.stopped || !sessionKey) return
-    const carry = this.segments.carry(sessionKey)
+    const carry = ['idle', 'age'].includes(reason) ? { exchanges: [] } : this.segments.carry(sessionKey)
     const text = carry.exchanges.length > 0 ? renderCarry(carry.exchanges) : ''
     await this.segments.begin(sessionKey, { sessionId, reason })
+    this.segmentCarry.delete(sessionKey)
     if (text) this.segmentCarry.set(sessionKey, text)
     if (sessionId) {
       await this.resetInjected(sessionId).catch(error => {
@@ -1064,7 +1063,8 @@ class MemoryRuntime {
       const note = await this.client.request('/v1/segment/note', {
         ...this.client.scope(sessionId),
         switched_at: new Date(Number(record.started_at) || Date.now()).toISOString(),
-        last_user_at: new Date(Number(record.last_user_at) || Number(record.started_at) || Date.now()).toISOString(),
+        last_user_at: new Date(Number(record.previous_last_user_at) || Number(record.last_user_at)
+          || Number(record.started_at) || Date.now()).toISOString(),
       })
       return typeof note?.text === 'string' ? note.text.trim() : ''
     } catch (error) {
@@ -1420,6 +1420,7 @@ class MemoryRuntime {
         text: input.text,
       })
       requirePersona(context)
+      const consumed = contextReferences(context)
       await this.client.request('/v1/context/reserve', {
         ...this.client.scope(sessionId),
         request_id: requestId,
@@ -1431,15 +1432,31 @@ class MemoryRuntime {
         consumer_refs: {
           plugin_id: this.config.pluginId,
           session_id: sessionScopeId(sessionId),
-          memory_ids: [...(context.context?.memory_ids ?? [])],
-          source_ids: [...(context.context?.source_ids ?? [])],
+          memory_ids: consumed.ids,
+          source_ids: consumed.sources,
           context_generation: String(context.persona_version ?? ''),
         },
       })
       // 人格只进系统段:每次真实采用都用**已发布全文**覆盖该段文本,新发布
       // 因此在下一轮装配时生效,旧正文不会残留在系统提示里。
       this.personas.set(sessionId, context.persona ?? '')
-      const background = await this.renderBackground(sessionId, context)
+      const background = await this.renderBackground(sessionId, context, agent, input.text)
+      const segment = segmentKey ? this.segments.current(segmentKey) : undefined
+      if (segment?.previous_session_id && segment.exchanges.length === 0
+        && context.context?.followup?.status === 'resolved') {
+        const note = await this.segmentNoteFor(segmentKey, sessionId)
+        if (note) background.text = [background.text, note].filter(Boolean).join('\n\n')
+      }
+      const contactNow = this.client.now()
+      this.contactTimes.set(sessionId, contactNow)
+      if (this.config.proactiveEnabled) {
+        const clock = this.proactive.clockMaterial(sessionId, contactNow)
+        const fingerprint = 'clock:' + stableHash(clock)
+        if (!this.client.state.injected[sessionScopeId(sessionId)]?.[fingerprint]) {
+          background.text = [background.text, clock].filter(Boolean).join('\n\n')
+          background.fingerprints.push(fingerprint)
+        }
+      }
       const prepared = {
         requestId,
         scope: this.client.scope(sessionId),
@@ -1464,6 +1481,7 @@ class MemoryRuntime {
         },
         input: input.text,
       }
+      this.contactSources.set(sessionId, { source_key: prepared.body.source_key, refs: consumed.sources })
       await this.client.serial(async () => {
         if (Object.keys(this.client.state.pending).length + Object.keys(this.client.state.generated).length >= this.config.maxPending) {
           throw new Error('记忆补交队列已满，请恢复服务后重试')
@@ -1476,8 +1494,8 @@ class MemoryRuntime {
           return [...(meta.source_event_keys ?? []), ...(meta.source_key ? [meta.source_key] : [])]
         })
         this.client.state.references[scopeId] = {
-          ids: [...new Set([...prior.ids, ...(context.context?.memory_ids ?? []), ...(context.context?.source_ids ?? [])])],
-          sources: [...new Set([...prior.sources, prepared.body.source_key, ...recentSources])],
+          ids: [...new Set([...prior.ids, ...consumed.ids, ...consumed.sources])],
+          sources: [...new Set([...prior.sources, prepared.body.source_key, ...consumed.sources, ...recentSources])],
           versions: [...new Set([...prior.versions, ...(context.persona_version ? [context.persona_version] : [])])],
         }
         this.client.state.generated[requestId] = {
@@ -1517,10 +1535,14 @@ class MemoryRuntime {
    * 里真正注入过的条目不再重贴;三类都没有新增时返回空文本,调用方据此
    * 完全不追加消息。
    */
-  async renderBackground(sessionId, context) {
+  async renderBackground(sessionId, context, agent, currentInput) {
     const scopeId = sessionScopeId(sessionId)
     const seen = this.client.state.injected[scopeId] ?? {}
-    return renderIncrement(context, seen, { scopeId })
+    const history = agent?.session?.deriveMessages?.() ?? []
+    return renderIncrement(context, seen, { scopeId,
+      currentInput,
+      representedText: history.filter(message => message.source?.kind !== MEMORY_SOURCE)
+        .map(messageText).join('\n') })
   }
 
   // -- turn completion -------------------------------------------------
@@ -1655,6 +1677,7 @@ class MemoryRuntime {
     if (!report.sessionId) return
     if (this.client.isRetired(report.sessionId)) return
     if (!report.reply) return
+    if (report.parts?.some(part => part.ok)) await this.proactive.delivered(report)
     const scope = this.client.scope(report.sessionId)
     // The receipt must name the turn the save used. The bridge reports the DSH
     // user-message id; without it there is no honest key, so nothing is
@@ -1961,7 +1984,8 @@ export function segmentPolicyFor(runtime) {
     },
     /** 换段已发生:开新段并记下要带进新会话的旧话。 */
     async carryOverText(sessionKey, previousSessionId, sessionId) {
-      await runtime.onSegmentSwitched(sessionKey, { previousSessionId, sessionId, reason: 'policy' })
+      const reason = runtime.segmentSwitchReason(sessionKey, previousSessionId) ?? 'policy'
+      await runtime.onSegmentSwitched(sessionKey, { previousSessionId, sessionId, reason })
     },
   }
 }
@@ -2281,6 +2305,17 @@ function episodeEntries(context) {
  * 续接由服务端的召回与 followup 判定负责,不靠这里每轮复读。
  */
 export function renderIncrement(context, seen = {}, options = {}) {
+  const query = typeof options.currentInput === 'string'
+    ? options.currentInput.replace(/\[图片\d+[^\]]*\]/gu, '').trim() : undefined
+  const minimal = context?.material_policy?.minimal === true || (query !== undefined
+    && (!query || /^(?:在吗|你好|早|晚安|看看这张图|你看这个)[？?！!。]*$/u.test(query)))
+  const represented = [context?.persona ?? '', options.representedText ?? '']
+    .flatMap(text => String(text).split('\n'))
+    .map(text => stableText(narrativeMemoryText(text))).filter(Boolean)
+  const isRepresented = text => {
+    const clean = stableText(narrativeMemoryText(text))
+    return clean.length > 3 && represented.some(line => line.includes(clean))
+  }
   const scopeId = options.scopeId ?? ''
   const sections = []
   const fingerprints = []
@@ -2300,7 +2335,7 @@ export function renderIncrement(context, seen = {}, options = {}) {
     for (const entry of corrections) fingerprints.push(entry.fingerprint)
   }
 
-  const memories = fresh(recallEntries(context?.context))
+  const memories = minimal ? [] : fresh(recallEntries(context?.context)).filter(entry => !isRepresented(entry.text))
   if (memories.length > 0) {
     sections.push(['[可能相关的记忆]', ...memories.map(entry => entry.text)].join('\n'))
     for (const entry of memories) fingerprints.push(entry.fingerprint)
@@ -2310,7 +2345,7 @@ export function renderIncrement(context, seen = {}, options = {}) {
   // 别的端(例如网页会话)的轮次也放进来,那才是 DSH 里看不到的材料;本会话
   // 自己的消息已经在上下文里,再贴一次就是重复。
   const selfScope = String(scopeId ?? '')
-  const recent = (Array.isArray(context?.recent_turns) ? context.recent_turns : [])
+  const recent = (minimal ? [] : Array.isArray(context?.recent_turns) ? context.recent_turns : [])
     .filter(row => {
       const owner = turnScopeId(row)
       return !owner || !selfScope || owner !== selfScope
@@ -2357,7 +2392,7 @@ export function renderIncrement(context, seen = {}, options = {}) {
     return spoken.some(line => line.includes(clean) || clean.includes(line))
   }
   const facts = fresh(summaryEntries(summary?.sections?.important_facts, 'fact'))
-    .filter(entry => !alreadySaid(entry.text))
+    .filter(entry => !minimal && !alreadySaid(entry.text) && !isRepresented(entry.text)).slice(0, 3)
   if (facts.length > 0) {
     sections.push(['[重要事实]', ...facts.map(entry => entry.text)].join('\n'))
     for (const entry of facts) fingerprints.push(entry.fingerprint)
@@ -2372,7 +2407,7 @@ export function renderIncrement(context, seen = {}, options = {}) {
   }
 
   // 进行中的事与未完话题单独一段:它们是"旧事项",只在第一次真正交付时出现。
-  const pendingThreads = fresh([
+  const pendingThreads = minimal ? [] : fresh([
     ...threads,
     ...threadEntries(summary?.sections?.open_threads),
   ])
@@ -2381,7 +2416,7 @@ export function renderIncrement(context, seen = {}, options = {}) {
     for (const entry of pendingThreads) fingerprints.push(entry.fingerprint)
   }
 
-  const episode = fresh(episodeEntries(context))
+  const episode = minimal ? [] : fresh(episodeEntries(context))
   if (episode.length > 0) {
     sections.push(['[这段经历]', ...episode.map(entry => entry.text)].join('\n'))
     for (const entry of episode) fingerprints.push(entry.fingerprint)

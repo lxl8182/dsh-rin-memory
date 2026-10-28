@@ -23,6 +23,8 @@
  * 报给服务,规则由服务端从自己保存的原文确定性派生(设计 §8.3/§8.5)。标签里
  * 写什么都不会被当成规则文本发出去 —— 这是安全底线,不是实现细节。
  */
+import { contactControls } from './contact.js'
+
 export const SPELLS = Object.freeze(['读取', '执行', '翻本子', '改写', '撕掉', '学到'])
 
 /**
@@ -33,7 +35,7 @@ export const SPELLS = Object.freeze(['读取', '执行', '翻本子', '改写', 
  *   visible 是去掉标签后的可见正文(可能为空串),casts 按出现顺序排列。
  */
 export function parseSpells(text, learnedNames = []) {
-  const source = String(text ?? '')
+  const source = contactControls(text).text
   const casts = []
   const unknown = []
   if (!source) return { visible: '', casts, unknown }

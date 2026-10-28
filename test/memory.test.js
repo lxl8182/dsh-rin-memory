@@ -759,7 +759,7 @@ test('a compaction opens a new context generation, so material can be re-deliver
   const h = await start(t, f)
   const agent = makeAgent('qq-owner')
   h.ctx.emit('agent/created', { agent })
-  await agent.preStep({ turn: 1, step: 1, messages: [userMessage('m1', '你好')] })
+  await agent.preStep({ turn: 1, step: 1, messages: [userMessage('m1', '红茶怎么样')] })
   const quiet = await agent.preStep({ turn: 2, step: 1, messages: [userMessage('m2', '在干嘛')] })
   assert.equal(quiet.messages.length, 1, 'unchanged material is not re-posted')
 

@@ -94,6 +94,20 @@ export function charCount(text) {
   return Array.from(String(text ?? '')).length
 }
 
+/** References supplied by recall and its working-summary layers. */
+export function contextReferences(context) {
+  const ids = new Set(context.context?.memory_ids ?? [])
+  const sources = new Set(context.context?.source_ids ?? [])
+  for (const section of Object.values(context.working_summary?.sections ?? {})) {
+    for (const ref of section.refs ?? []) if (typeof ref === 'string') sources.add(ref)
+    for (const item of section.items ?? []) {
+      if (item.id) ids.add(item.id)
+      for (const source of item.source_keys ?? []) sources.add(source)
+    }
+  }
+  return { ids: [...ids], sources: [...sources] }
+}
+
 /** 插件自己的稳定会话标识;DSH session id 会随重建/清理变化,不能当身份。 */
 export function sessionScopeId(sessionId) {
   return `dsh-${hash(String(sessionId ?? ''))}`
@@ -164,6 +178,7 @@ export class MemoryClient {
       // not re-post memories it already delivered in this context.
       injected: raw.injected && typeof raw.injected === 'object' ? raw.injected : {},
       proactiveOutputs: raw.proactiveOutputs ?? {},
+      contact: raw.contact,
     }
   }
 

@@ -12,10 +12,21 @@
  * 凭据永远只有变量名或受限文件路径,不在这里出现值。
  */
 import Schema from '@deepseek-ai/schemastery'
+import { CONTACT_DEFAULTS } from './contact.js'
 
 const secret = field => (typeof field.role === 'function' ? field.role('secret') : field)
 
 const Config = Schema.object({
+  contact: Schema.object({
+    timezone: Schema.string().default(CONTACT_DEFAULTS.timezone),
+    dailyLimit: Schema.number().default(CONTACT_DEFAULTS.dailyLimit),
+    minGapMinutes: Schema.number().default(CONTACT_DEFAULTS.minGapMinutes),
+    quietStart: Schema.number().default(CONTACT_DEFAULTS.quietStart),
+    quietEnd: Schema.number().default(CONTACT_DEFAULTS.quietEnd),
+    followupHours: Schema.number().default(CONTACT_DEFAULTS.followupHours),
+    materialRefreshMinutes: Schema.number().default(CONTACT_DEFAULTS.materialRefreshMinutes),
+    sources: Schema.array(Schema.string()).default([...CONTACT_DEFAULTS.sources]),
+  }).default({ ...CONTACT_DEFAULTS }).description('主动交流的时区、频率上限和公开素材来源。'),
   enabled: Schema.boolean()
     .default(false)
     .description('启用后接入铃芽 RIN：采用已发布人格、读取记忆并保存真实轮次。默认关闭。'),

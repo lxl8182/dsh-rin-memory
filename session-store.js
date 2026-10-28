@@ -214,10 +214,10 @@ export function segmentSwitchReason(record, { now, limits = SEGMENT_DEFAULTS } =
   const tokens = Number(record.tokens ?? 0)
   const exchanges = Array.isArray(record.exchanges) ? record.exchanges.length : 0
   if (tokens >= limits.hardTokens) return 'hard'
-  if (exchanges < limits.minTurns) return null
-  if (tokens >= limits.budgetTokens) return 'budget'
   const lastUser = Number(record.last_user_at ?? 0)
   if (Number.isFinite(lastUser) && now - lastUser >= limits.idleHours * HOUR_MS) return 'idle'
+  if (exchanges < limits.minTurns) return null
+  if (tokens >= limits.budgetTokens) return 'budget'
   const started = Number(record.started_at ?? 0)
   if (Number.isFinite(started) && started > 0 && now - started >= limits.maxAgeDays * DAY_MS) return 'age'
   return null
@@ -369,6 +369,7 @@ export class SegmentStore {
         session_id: sessionId ?? '',
         previous_segment_id: previous?.segment_id ?? '',
         previous_session_id: previous?.session_id ?? '',
+        previous_last_user_at: previous?.last_user_at ?? 0,
         reason: reason ?? '',
       }
       this.segments[sessionKey] = record

@@ -70,6 +70,8 @@ const BASE_MAGIC_RULES = [
   // 这不是推测 —— 2026-10-26 实测到过它编造「终端反馈:咒语【报时】学会啦」。
   '7. 学咒语:<学咒语>名字 ||| 说明</学咒语> —— 不会的本事就现学,学成学败程序会回话。',
   '8. 忘掉咒语:<忘掉咒语>名字</忘掉咒语>',
+  '想以后再找主人聊，可以在话末记<下次联系>明天20:30｜想问问面试怎么样了</下次联系>；也可写带时区的日期时间、等新进展或暂停。它只记在本子里，不用等终端反馈。',
+  '主动从材料里选了话题，在话末记<选题>候选编号</选题>；这些记号不念给主人听。',
   // 这一句只影响"要不要动手"那一轮的心里活动,救回一部分被拉成分析腔的思考。
   // 实测(2026-10-26):需要判断的输入从 2/5 回到 4/5;闲聊不受影响。
   '选哪个咒语不用讲道理,就像伸手拿东西一样自然——想到什么直接念,不用先在心里列步骤。',
@@ -116,6 +118,33 @@ export const MATERIAL_NOTE =
  * 的名字集合因此为空。魔法标签走的是正文解析,不经过工具注册表。
  */
 const ALLOWED = new Set(MAIN_SESSION_TOOLS)
+const compactionGuards = new WeakMap()
+
+/** The native policy dynamically calls this public method for both triggers. */
+function suppressCompaction(service, sessionId) {
+  if (typeof service?.compactIfNeeded !== 'function') return () => {}
+  let state = compactionGuards.get(service)
+  if (!state) {
+    const original = service.compactIfNeeded
+    state = { original, sessions: new Map() }
+    state.guarded = function (agent, ...args) {
+      if (state.sessions.has(agent?.session?.id)) return Promise.resolve(null)
+      return original.call(this, agent, ...args)
+    }
+    service.compactIfNeeded = state.guarded
+    compactionGuards.set(service, state)
+  }
+  state.sessions.set(sessionId, (state.sessions.get(sessionId) ?? 0) + 1)
+  return () => {
+    const remaining = (state.sessions.get(sessionId) ?? 1) - 1
+    if (remaining) state.sessions.set(sessionId, remaining)
+    else state.sessions.delete(sessionId)
+    if (!state.sessions.size) {
+      if (service.compactIfNeeded === state.guarded) service.compactIfNeeded = state.original
+      compactionGuards.delete(service)
+    }
+  }
+}
 
 /**
  * 一个 QQ 主会话 agent 上的隔离句柄。
@@ -199,6 +228,14 @@ export class MainSessionScope {
       this.logger.warn?.(`[dsh-rin-memory] 主会话执行闸安装失败:${error?.message ?? error}`)
     }
     this.installed = true
+    if (typeof agentCtx.inject === 'function') {
+      const fiber = agentCtx.inject(['compaction'], scope => {
+        scope.effect(() => suppressCompaction(scope.get('compaction'), this.agent.session.id))
+      })
+      this.disposers.push(() => fiber?.dispose())
+    } else if (typeof agentCtx.get === 'function') {
+      this.disposers.push(suppressCompaction(agentCtx.get('compaction'), this.agent.session.id))
+    }
     return true
   }
 

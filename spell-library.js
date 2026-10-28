@@ -32,7 +32,7 @@ export function parseSolved(text) {
 
 function validate(spell) {
   if (!/^[\p{Script=Han}]{2,8}$/u.test(spell.name)) throw new Error('咒语名字必须是 2–8 个中文字符。')
-  if ([...SPELLS, ...META_SPELLS].includes(spell.name)) throw new Error('不能与内置咒语重名。')
+  if ([...SPELLS, ...META_SPELLS, '下次联系', '选题'].includes(spell.name)) throw new Error('不能与内置咒语或联系记号重名。')
   if (!spell.note || spell.note.length > 120 || /[\r\n]/.test(spell.note)) throw new Error('说明须为 1–120 字的单行文字。')
   if (!VIA.has(spell.via)) throw new Error('via 只能是读取、生成或执行，不能指向学来的咒语。')
   if (!spell.template.trim()) throw new Error('模板不能为空。')

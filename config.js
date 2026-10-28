@@ -10,11 +10,12 @@
  */
 
 import { SEGMENT_DEFAULTS } from './session-store.js'
+import { CONTACT_DEFAULTS, normalizeContact } from './contact.js'
 
 /**
  * @typedef {object} MemoryPluginConfig
  * @property {boolean} enabled 总开关。默认关闭:安装不等于启用。
- * @property {boolean} proactiveEnabled 是否消费服务的主动候选并唤醒主会话。
+ * @property {boolean} proactiveEnabled 是否启用插件联系计划与主动交流。
  * @property {string} url rin-memory 服务地址;只接受本机回环 HTTP。
  * @property {string} clientId 在服务端 stack.toml 里配置的客户端 id。
  * @property {string} characterId 读取记忆与人格的角色。
@@ -47,6 +48,7 @@ export const DEFAULT_CONFIG = {
   sessionPrefixes: ['qq-'],
   memoryTools: true,
   proactiveEnabled: true,
+  contact: { ...CONTACT_DEFAULTS },
   stateDirectory: '',
   sessionsDirectory: '',
   maxPending: 256,
@@ -103,6 +105,7 @@ export function normalizeConfig(options) {
     config.sessionPrefixes = [...DEFAULT_CONFIG.sessionPrefixes]
   }
   config.segment = normalizeSegment(raw.segment)
+  config.contact = normalizeContact(raw.contact)
   return config
 }
 

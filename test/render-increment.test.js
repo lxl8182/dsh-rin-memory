@@ -211,7 +211,7 @@ function runtimeWith(contextPayload) {
   const ctx = { profileContext: { home: process.cwd() }, get: () => undefined, on: () => () => {} }
   const config = normalizeConfig({ stateDirectory: process.cwd(), sessionsDirectory: process.cwd() })
   const runtime = new MemoryRuntime(ctx, config, client, { info() {}, warn() {}, error() {} })
-  runtime.bridge = { binding: sessionId => ({ sessionId, owner: true, scope: 'private', input: '' }) }
+  runtime.bridge = { binding: sessionId => ({ sessionId, owner: true, scope: 'private', input: '今天面试怎么样' }) }
   return { runtime, requests }
 }
 
@@ -248,7 +248,7 @@ test('G20: state / episode / growth fragments really land in the final message l
   // 指纹确实被登记:下一轮不会重贴。
   const scope = Object.keys(runtime.client.state.injected)[0]
   assert.ok(scope, 'the injected index was written')
-  assert.equal(Object.keys(runtime.client.state.injected[scope]).length, 9)
+  assert.equal(Object.keys(runtime.client.state.injected[scope]).filter(key => !key.startsWith('clock:')).length, 9)
 })
 
 test('narrative projection changes viewpoint while preserving quotes, raw facts and recent speech', () => {
@@ -270,6 +270,7 @@ test('narrative projection changes viewpoint while preserving quotes, raw facts 
 
 test('G20: a turn with nothing new adds no message at all', async () => {
   const { runtime } = runtimeWith(context())
+  runtime.config.proactiveEnabled = false
   const agent = { session: { id: 'qq-g20b', header: {} }, options: {}, followup() {} }
   const first = await runtime.preStep(
     agent, { turn: 1, step: 1, messages: [userMessage('m1', '你好')] },

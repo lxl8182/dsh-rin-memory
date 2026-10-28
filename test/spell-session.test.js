@@ -2,6 +2,24 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryRuntime } from '../index.js'
 import { normalizeConfig } from '../config.js'
+import { MainSessionScope } from '../main-session.js'
+
+test('QQ scope skips native pressure and overflow compression; workers and unload preserve the native policy', async () => {
+  const calls = []
+  const native = async (agent, trigger) => { calls.push([agent.session.id, trigger]); return 'native' }
+  const service = { compactIfNeeded: native }
+  const agent = { session: { id: 'qq-compaction-guard' }, ctx: {
+    on: () => () => {}, get: () => service, tools: { guard: () => () => {} },
+  } }
+  const scope = new MainSessionScope(agent, { logger: { warn() {} } })
+  assert.equal(scope.install(), true)
+  assert.equal(await service.compactIfNeeded(agent, 'pressure'), null)
+  assert.equal(await service.compactIfNeeded(agent, 'context-overflow'), null)
+  assert.equal(await service.compactIfNeeded({ session: { id: 'worker' } }, 'pressure'), 'native')
+  assert.deepEqual(calls, [['worker', 'pressure']])
+  scope.dispose()
+  assert.equal(service.compactIfNeeded, native)
+})
 
 function fixture() {
   const feedback = [], workers = [], hooks = new Map()
