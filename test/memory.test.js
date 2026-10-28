@@ -287,14 +287,14 @@ test('the persona lives in the system section; only new background is injected; 
   assert.ok(!/pub-1|\d{4}-\d{2}-\d{2}|request/i.test(MEMORY_RULES), 'no version, timestamp or request id')
 
   const first = await agent.preStep({ turn: 1, step: 1, messages: [userMessage('m1', '记住我喜欢红茶')] })
-  const injected = first.messages.at(-1)
+  const injected = first.messages.find(message => message.source?.kind === 'rin-memory')
   assert.equal(injected.source.kind, 'rin-memory')
   // The persona is in the system section, never repeated in the message.
   assert.equal(agent.sectionText('deployment:persona-prefix'), '温柔而直白。')
   assert.ok(!injected.content[0].text.includes('温柔而直白。'), 'the full persona is not in the user message')
   assert.ok(!/\[当前人格\]|发布版本/.test(injected.content[0].text), 'no persona card or release fence')
   assert.match(injected.content[0].text, /不要使用旧称呼/)
-  assert.match(injected.content[0].text, /用户喜欢红茶/)
+  assert.match(injected.content[0].text, /主人喜欢红茶/)
   assert.ok(!injected.content[0].text.includes('记住我喜欢红茶'), 'the user input is not echoed back')
 
   // A second step in the same turn shares the prepared turn: no second context
@@ -340,9 +340,9 @@ test('the persona lives in the system section; only new background is injected; 
   // A genuinely new memory entry is delivered once and only once.
   f.state.memoryIds = ['fact-2']
   const third = await agent.preStep({ turn: 3, step: 1, messages: [userMessage('m3', '还记得吗')] })
-  const fresh = third.messages.at(-1)
+  const fresh = third.messages.find(message => message.source?.kind === 'rin-memory')
   assert.equal(fresh.source.kind, 'rin-memory')
-  assert.match(fresh.content[0].text, /用户喜欢红茶/)
+  assert.match(fresh.content[0].text, /主人喜欢红茶/)
   assert.ok(!fresh.content[0].text.includes('不要使用旧称呼'), 'an unchanged correction is not repeated')
 
   const fourth = await agent.preStep({ turn: 4, step: 1, messages: [userMessage('m4', '继续')] })
@@ -735,8 +735,8 @@ test('the injected background keeps the three kinds of material apart, without t
   assert.match(text, /\[必须遵守的更正\]/)
   assert.match(text, /\[可能相关的记忆\]/)
   assert.match(text, /\[近期对话\]/)
-  assert.match(text, /用户:我说过我喜欢红茶/)
-  assert.match(text, /你:嗯,记住了/)
+  assert.match(text, /主人:我说过我喜欢红茶/)
+  assert.match(text, /我:嗯,记住了/)
   // The persona belongs to the system section; repeating it here was the
   // reason every message carried a full card.
   assert.ok(!/名字: 小潮/.test(text), 'the persona is not repeated in the message')
@@ -770,9 +770,9 @@ test('a compaction opens a new context generation, so material can be re-deliver
   }
   await new Promise(resolve => setTimeout(resolve, 40))
   const again = await agent.preStep({ turn: 3, step: 1, messages: [userMessage('m3', '继续说')] })
-  assert.equal(again.messages.at(-1)?.source?.kind, 'rin-memory',
+  assert.equal(again.messages[0]?.source?.kind, 'rin-memory',
     'after compaction the material is delivered again')
-  assert.match(again.messages.at(-1).content[0].text, /不要使用旧称呼/)
+  assert.match(again.messages[0].content[0].text, /不要使用旧称呼/)
 })
 
 test('a retired session is never re-attached', async t => {
@@ -966,5 +966,5 @@ test('missing required context blocks the native model boundary instead of falli
   await assert.rejects(agent.preStep({ turn: 2, step: 1, messages: [userMessage('m-block', '请继续')] }), /MEMORY_REQUIRED/)
   f.state.persona = '恢复后的已发布人格'
   const admitted = await agent.preStep({ turn: 2, step: 1, messages: [userMessage('m-block', '请继续')] })
-  assert.equal(admitted.messages.at(-1).source.kind, 'rin-memory')
+  assert.equal(admitted.messages[0].source.kind, 'rin-memory')
 })

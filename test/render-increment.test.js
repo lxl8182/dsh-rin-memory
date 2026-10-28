@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { MemoryRuntime, renderIncrement } from '../index.js'
+import { MemoryRuntime, narrativeMemoryText, renderIncrement } from '../index.js'
 import { normalizeConfig } from '../config.js'
 import { MATERIAL_NOTE } from '../main-session.js'
 
@@ -226,12 +226,16 @@ test('G20: state / episode / growth fragments really land in the final message l
     options: { provider: 'test', model: 'model' },
     followup() {},
   }
-  const payload = { turn: 1, step: 1, messages: [userMessage('m1', '今天面试怎么样')] }
+  const input = userMessage('m1', '今天面试怎么样')
+  input.content.push({ type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png' } })
+  const payload = { turn: 1, step: 1, messages: [input] }
   const decision = await runtime.preStep(agent, payload, async () => ({
     kind: 'enter', messages: [...payload.messages],
   }))
   assert.ok(requests.includes('/v1/context'))
-  const injected = decision.messages.at(-1)
+  assert.equal(decision.messages.at(-1), input, 'the actual user and its image stay last and unchanged')
+  assert.equal(input.content[1].attachment.attachmentId, 'image-1')
+  const injected = decision.messages.find(message => message.source?.kind === 'rin-memory')
   assert.equal(injected.source.kind, 'rin-memory', 'the material is a marked source, not a user message')
   const text = injected.content[0].text
   // 三层都必须真的在这条消息里 —— 不是只渲染出来又被丢掉。
@@ -245,6 +249,21 @@ test('G20: state / episode / growth fragments really land in the final message l
   const scope = Object.keys(runtime.client.state.injected)[0]
   assert.ok(scope, 'the injected index was written')
   assert.equal(Object.keys(runtime.client.state.injected[scope]).length, 9)
+})
+
+test('narrative projection changes viewpoint while preserving quotes, raw facts and recent speech', () => {
+  assert.equal(narrativeMemoryText('用户已经为助手提供了服务器。\n助手很开心。\n用户说：“助手很乖。”'),
+    '主人已经为我提供了服务器。\n我很开心。\n主人说：“助手很乖。”')
+  const raw = '用户希望助手陪自己看电影。'
+  const source = { context: { block: raw }, recent_turns: [
+    { type: 'human', data: { content: '我想给助手起个名字' } },
+  ] }
+  const output = renderIncrement(source)
+  assert.ok(output.text.startsWith('【我的记事】'))
+  assert.ok(!output.text.includes('记忆服务为本轮'))
+  assert.match(output.text, /主人希望我陪自己看电影/)
+  assert.match(output.text, /主人:我想给助手起个名字/)
+  assert.equal(source.context.block, raw)
 })
 
 test('G20: a turn with nothing new adds no message at all', async () => {

@@ -1113,12 +1113,15 @@ class MemoryRuntime {
     // 后台任务的结果是一条**有任务来源**的外部事件:它不是用户说的话,也不是
     // 记忆资料。每条只投一次——投递成功才 markNotified。
     for (const task of this.pendingTaskNotices(agent)) {
-      messages.push({
+      const notice = {
         id: `task:${task.taskId}`,
         role: 'user',
         source: { kind: TASK_SOURCE },
         content: [{ type: 'text', text: this.taskNoticeText(task) }],
-      })
+      }
+      const inputIndex = messages.findLastIndex(message =>
+        message.source?.kind === 'user' || message.source?.kind === PROACTIVE_SOURCE)
+      messages.splice(inputIndex < 0 ? messages.length : inputIndex, 0, notice)
       await this.taskStore?.markNotified(task.taskId).catch(error => {
         this.logger.warn?.(`[dsh-rin-memory] 任务通知标记失败：${error.message}`)
       })
@@ -1126,18 +1129,20 @@ class MemoryRuntime {
     if (!prepared.background) {
       return messages.length > decision.messages.length ? { ...decision, messages } : decision
     }
-    // 注入的是有来源标记的 user-role 消息:模型能区分“记忆服务补充的材料”
-    // 与用户本人刚说的话;下一次同样的内容不会再贴一遍。
+    // 背景先于本轮输入，主人原话（包括图片）保留在最后；来源标记用于记忆隔离。
     // 索引写失败不阻断这一轮(材料已经给出去了),最坏只是下一轮重贴一次。
     await this.markInjected(sessionId, prepared.fingerprints).catch(error => {
       this.logger.warn?.(`[dsh-rin-memory] 注入索引保存失败：${error.message}`)
     })
-    messages.push({
+    const material = {
       id: `memory:${prepared.requestId}`,
       role: 'user',
       source: { kind: MEMORY_SOURCE },
       content: [{ type: 'text', text: prepared.background }],
-    })
+    }
+    const inputIndex = messages.findLastIndex(message =>
+      message.source?.kind === 'user' || message.source?.kind === PROACTIVE_SOURCE)
+    messages.splice(inputIndex < 0 ? 0 : inputIndex, 0, material)
     return { ...decision, messages }
   }
 
@@ -2051,7 +2056,7 @@ export function renderIncrement(context, seen = {}, options = {}) {
   const recentEntries = fresh(recent.map((row, index) => ({
     text: (() => {
       const text = plain(row?.data ?? row).trim()
-      return text ? `${row?.type === 'human' ? '用户' : '你'}:${text}` : ''
+      return text ? `${row?.type === 'human' ? '主人' : '我'}:${text}` : ''
     })(),
     fingerprint: turnFingerprint(row, index),
   })))
@@ -2121,8 +2126,20 @@ export function renderIncrement(context, seen = {}, options = {}) {
 
   if (sections.length === 0) return { text: '', fingerprints: [] }
   // header 只在真有增量时出现:正常轮次(没有新增材料)完全没有任何附加消息。
-  // 它承担原来常驻规则段里唯一还需要说的那句话——这些是资料,不是主人发的消息。
-  return { text: `${MATERIAL_NOTE}\n${sections.join('\n\n')}`, fingerprints }
+  // 用记事标题区分回忆与主人本轮发言。
+  const narrative = sections.map(section => section.startsWith('[近期对话]')
+    ? section : narrativeMemoryText(section)).join('\n\n')
+  return { text: `${MATERIAL_NOTE}\n${narrative}`, fingerprints }
+}
+
+/** 展示时使用角色视角；引号内保留原话，来源正文和指纹保持原样。 */
+export function narrativeMemoryText(text) {
+  return String(text).split(/(“[^”]*”|「[^」]*」|『[^』]*』|"(?:\\.|[^"\\])*")/gu)
+    .map((part, index) => index % 2 ? part : part
+      .replace(/^(\s*(?:[-•]\s*)?)用户(?=[\p{Script=Han}:：，。\s])/gmu, '$1主人')
+      .replace(/^(\s*(?:[-•]\s*)?)助手(?=[\p{Script=Han}:：，。\s])/gmu, '$1我')
+      .replace(/(为|给|向|让|请|希望|要求|告诉)助手(?=[\p{Script=Han}，。\s])/gu, '$1我'))
+    .join('')
 }
 
 function requirePersona(context) {
