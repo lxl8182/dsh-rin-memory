@@ -158,11 +158,13 @@ export class MainSessionScope {
    * @param {object} options
    * @param {(agent: object) => string | Promise<string>} options.currentPersona 读取该 agent 当前应采用的完整人格正文
    * @param {object} [options.logger]
+   * @param {boolean} [options.chatOnly] 好友/群仅使用 QQ 预设，不读取人格记忆或展示咒语。
    */
-  constructor(agent, { currentPersona, learned = () => [], logger = console } = {}) {
+  constructor(agent, { currentPersona, learned = () => [], chatOnly = false, logger = console } = {}) {
     this.agent = agent
     this.currentPersona = currentPersona ?? (() => '')
     this.learned = learned
+    this.chatOnly = chatOnly
     this.logger = logger
     this.disposers = []
     this.installed = false
@@ -254,7 +256,9 @@ export class MainSessionScope {
     this.assemblies += 1
     let persona = ''
     try {
-      persona = String(await this.currentPersona(this.agent) ?? '')
+      persona = this.chatOnly
+        ? String(upstream.sections.find(section => section.name === PERSONA_SECTION)?.text ?? '')
+        : String(await this.currentPersona(this.agent) ?? '')
     } catch (error) {
       this.logger.warn?.(`[dsh-rin-memory] 读取当前人格失败:${error?.message ?? error}`)
       // Keep the last persona this session actually used rather than dropping
@@ -272,7 +276,8 @@ export class MainSessionScope {
     // 主请求;规则里真正还有用的那一句下沉到增量材料 header(只在真有增量时出现)。
     const sections = []
     if (persona) sections.push({ name: PERSONA_SECTION, text: persona })
-    sections.push({ name: MAGIC_SECTION, text: magicText({ learned: this.learned() }), interpolate: false })
+    sections.push({ name: this.chatOnly ? 'rin-memory:chat' : MAGIC_SECTION,
+      text: this.chatOnly ? THINKING_VOICE : magicText({ learned: this.learned() }), interpolate: false })
     // tools 恒为空:不是"过滤",而是明确不报送任何 schema——见 MAIN_SESSION_TOOLS
     // 上方的实测说明。少了这个字段,thinking 才留在角色里。
     // 可选运行上下文清空；required 工作目录由本会话的空正文注册覆盖。

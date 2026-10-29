@@ -4,6 +4,39 @@ import { MemoryRuntime } from '../index.js'
 import { normalizeConfig } from '../config.js'
 import { MainSessionScope } from '../main-session.js'
 
+test('friend and group chat use preset persona and full history without memory, spells or compaction', async () => {
+  const f = fixture()
+  f.runtime.client.request = async () => { throw new Error('plain chat must never call memory') }
+  f.runtime.bridge = { binding: id => ({ owner: id === 'qq-group', scope: id === 'qq-group' ? 'group' : 'private' }) }
+  const history = Array.from({ length: 80 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `message-${index}` }))
+  for (const id of ['qq-friend-a', 'qq-friend-b', 'qq-group']) {
+    const main = f.agent(id)
+    f.runtime.observeAgent(main)
+    const admission = { sessionId: id, owner: id === 'qq-group', scope: id === 'qq-group' ? 'group' : 'private' }
+    await f.runtime.prepareBridgeInput(admission)
+    assert.equal(admission.chatOnlyReady, true)
+    const scope = f.runtime.chatScopes.get(main)
+    assert.ok(scope)
+    const shaped = await scope.shapeAssembly({}, async () => ({ messages: history, contexts: [{ text: 'runtime' }],
+      sections: [{ name: 'deployment:persona-prefix', text: '公开的QQ角色' }, { name: 'coding', text: '工作说明' }],
+      tools: [{ name: 'pwsh' }] }))
+    assert.equal(shaped.messages, history)
+    assert.equal(shaped.messages.length, 80)
+    assert.deepEqual(shaped.tools, [])
+    assert.deepEqual(shaped.contexts, [])
+    assert.equal(shaped.sections[0].text, '公开的QQ角色')
+    assert.doesNotMatch(JSON.stringify(shaped.sections), /魔法|读取|翻本子|执行|工作说明|本地完整人格/)
+    assert.equal(f.runtime.spellScopes.has(main), false)
+    assert.equal(f.runtime.attached.has(main), false)
+    f.emit(main, '<执行>echo secret</执行>', 1)
+    f.runtime.detach(main)
+    assert.equal(f.runtime.chatScopes.has(main), false)
+  }
+  await f.runtime.spellRunner.tail
+  assert.equal(f.workers.length, 0)
+  await f.runtime.spellRunner.dispose()
+})
+
 test('QQ scope skips native pressure and overflow compression; workers and unload preserve the native policy', async () => {
   const calls = []
   const native = async (agent, trigger) => { calls.push([agent.session.id, trigger]); return 'native' }

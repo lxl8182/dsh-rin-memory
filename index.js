@@ -208,6 +208,7 @@ class MemoryRuntime {
     this.logger = logger
     this.attached = new Map()
     this.spellScopes = new Map()
+    this.chatScopes = new Map()
     this.turns = new Map()
     this.bridge = null
     this.bridgeSubscription = null
@@ -728,6 +729,8 @@ class MemoryRuntime {
       try { attach.dispose?.() } catch { /* disposal is best effort */ }
     }
     this.attached.clear()
+    for (const scope of this.chatScopes.values()) scope.dispose()
+    this.chatScopes.clear()
     for (const agent of [...this.spellScopes.keys()]) this.detachSpells(agent)
     this.turns.clear()
     this.candidates.clear()
@@ -1217,7 +1220,13 @@ class MemoryRuntime {
     if (this.stopped) return
     if (!input.owner || input.scope !== 'private') {
       const agent = this.candidates.get(input.sessionId)
-      if (agent) this.detach(agent)
+      if (agent && !this.chatScopes.has(agent)) {
+        this.detach(agent)
+        const isolation = new MainSessionScope(agent, { chatOnly: true, logger: this.logger })
+        if (!isolation.install()) throw new Error('QQ 纯聊天隔离未就绪，请检查 DSH 插件状态。')
+        this.chatScopes.set(agent, isolation)
+      }
+      input.chatOnlyReady = !!agent && this.chatScopes.has(agent)
       return
     }
     if (!input.sessionId) throw new Error('MEMORY_REQUIRED: 缺少 QQ 会话绑定')
@@ -1248,6 +1257,8 @@ class MemoryRuntime {
   }
 
   detach(agent) {
+    this.chatScopes.get(agent)?.dispose()
+    this.chatScopes.delete(agent)
     this.detachSpells(agent)
     const entry = this.attached.get(agent)
     if (!entry) return
