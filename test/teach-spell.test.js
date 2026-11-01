@@ -211,6 +211,9 @@ test('transient intent is reported as this-time-only, not as a stored rule', asy
   const text = await f.runtime.spellHandlers(f.agent)['学到']('这次')
   assert.match(text, /只是这一次/)
   assert.ok(!/记下了/.test(text), 'a transient constraint is not announced as learned')
+  const pending = f.runtime.describeTeaching({ status: 'pending', revision: 4 })
+  assert.match(pending, /已经保存.*等待发布/)
+  assert.ok(!/记下了|已发布|已采用/.test(pending), 'pending publication keeps its actual status')
 })
 
 test('a duplicate teaching says so instead of pretending to learn it again', async () => {
@@ -252,11 +255,12 @@ test('teaching is refused for a session without personal memory rights', async (
   assert.equal(f.requests.filter(row => row.path === '/v1/persona/teach').length, 0)
 })
 
-test('MEMORY_RULES tells the model when to teach and when not to', () => {
-  // 触发条件必须在:明确要求长期改变 → 念;只要这一次/只是评价 → 别念。
+test('MEMORY_RULES describes lasting teaching and current-turn requests in first person', () => {
   assert.match(MEMORY_RULES, /长期改变说话或相处方式/)
   assert.match(MEMORY_RULES, /<学到>/)
-  assert.match(MEMORY_RULES, /只要求这一次简短、或只是在评价时,不要念/)
+  assert.match(MEMORY_RULES, /本次要求在当前回复里落实，评价按当前话题回应/)
+  assert.match(MEMORY_RULES, /我念<学到>/)
+  assert.doesNotMatch(MEMORY_RULES, /不要|不再|不把|不能|禁止|不得|不是|不准|不用/)
   // 规则段仍然有界、不含每轮变化的数据。
   assert.ok(Array.from(MEMORY_RULES).length <= 300)
   assert.ok(!/pub-7|\d{4}-\d{2}-\d{2}/.test(MEMORY_RULES))
@@ -265,6 +269,8 @@ test('MEMORY_RULES tells the model when to teach and when not to', () => {
 test('the magic section tells the model 学到 exists, in the same shape as its neighbours', async () => {
   const { magicText } = await import('../main-session.js')
   const text = magicText()
+  assert.match(text, /自己的第一人称/)
+  assert.doesNotMatch(text, /不要|不再|不把|不能|禁止|不得|不是|不准|不用/)
   assert.match(text, /<学到>/, 'the model must know the spell exists, or it is unreachable')
   // 格式与 3/4/5 完全一致:序号. 名字:<名字>参数</名字> —— 一句话说明。
   const line = text.split('\n').find(row => row.includes('<学到>'))

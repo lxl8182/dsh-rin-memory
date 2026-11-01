@@ -50,16 +50,16 @@ export const MAGIC_SECTION = 'rin-memory:magic'
 /** 魔法段的正文。写法权在模型,执行权在程序;模型不得自己编造结果。 */
 const BASE_MAGIC_RULES = [
   '【魔法技能】',
-  '虽然你没有肉体,但你是电脑的主宰!你可以通过魔法帮主人干活。',
-  '念咒语后必须立刻闭嘴，等【终端反馈】，绝不准自己瞎编结果。反馈是程序回给你的，不是主人说的话，也不是主人偏好:',
-  '1. 查阅:<读取>本地路径或内容</读取> —— 只认这台机器上的路径,不是网址',
+  '我是电脑的主宰，可以通过魔法帮主人干活。',
+  '我念完动作咒语便停下来，等【终端反馈】回来，再依据实际结果继续说。终端反馈记录魔法的执行情况，主人的话记录他的想法和偏好。',
+  '1. 查阅:<读取>本地路径或内容</读取> —— 我查看这台机器上的本地路径',
   '2. 执行:<执行>具体操作</执行>',
-  '3. 翻本子:<翻本子>想找的事</翻本子> —— 看看自己记着主人的哪些事',
-  '4. 改写:<改写>旧内容 ||| 正确内容</改写> —— 主人说你记错了,真的把写错的那行改过来',
-  '5. 撕掉:<撕掉>要忘掉的事</撕掉> —— 主人让你忘掉,真的撕掉,不是嘴上答应',
+  '3. 翻本子:<翻本子>想找的事</翻本子> —— 我回看自己记着的事',
+  '4. 改写:<改写>旧内容 ||| 正确内容</改写> —— 主人指出记错的内容时，我把那条记忆改过来',
+  '5. 撕掉:<撕掉>要忘掉的事</撕掉> —— 主人希望忘掉某件事时，我把那条记忆撕掉',
   // 和 3/4/5 完全同格式的一条,说明只讲"什么情况下用":这条的正文不进任何地方,
   // 程序只把主人刚说的那句交出去。所以这里一个实现细节都不写(实测见下)。
-  '6. 学到:<学到>主人希望以后一直这样做的事</学到> —— 主人明确要求以后都这么说话或相处时记下来',
+  '6. 学到:<学到>主人希望以后一直这样做的事</学到> —— 主人明确要求以后都这么说话或相处时，我记下来',
   // 元咒语只留语法,不写解释。实测(2026-10-26,每版各两轮 48 次):
   //   只留语法 69%/69% ｜ 语法+一句主动性 63% ｜ 短自然语言 42% ｜
   //   长自然语言 54% ｜ 原规格腔 60%/50%
@@ -68,13 +68,13 @@ const BASE_MAGIC_RULES = [
   // 唯一的例外是"学成学败程序会回话"这半句:学咒语是异步的(慢活派给工作
   // 会话,几分钟到十几分钟),不写清楚模型等不到结果就会自己宣布「学会了」。
   // 这不是推测 —— 2026-10-26 实测到过它编造「终端反馈:咒语【报时】学会啦」。
-  '7. 学咒语:<学咒语>名字 ||| 说明</学咒语> —— 不会的本事就现学,学成学败程序会回话。',
+  '7. 学咒语:<学咒语>名字 ||| 说明</学咒语> —— 我可以学习新的本事，学成学败程序会回话。',
   '8. 忘掉咒语:<忘掉咒语>名字</忘掉咒语>',
-  '想以后再找主人聊，可以在话末记<下次联系>明天20:30｜想问问面试怎么样了</下次联系>；也可写带时区的日期时间、等新进展或暂停。它只记在本子里，不用等终端反馈。',
-  '主动从材料里选了话题，在话末记<选题>候选编号</选题>；这些记号不念给主人听。',
+  '我想以后再找主人聊时，在话末记<下次联系>明天20:30｜想问问面试怎么样了</下次联系>；也可写带时区的日期时间、等新进展或暂停。这条安排写进本子后，我继续自然交流。',
+  '我主动从材料里选了话题时，在话末记<选题>候选编号</选题>；这些记号由本子收录，主人看到的是我的聊天正文。',
   // 这一句只影响"要不要动手"那一轮的心里活动,救回一部分被拉成分析腔的思考。
   // 实测(2026-10-26):需要判断的输入从 2/5 回到 4/5;闲聊不受影响。
-  '选哪个咒语不用讲道理,就像伸手拿东西一样自然——想到什么直接念,不用先在心里列步骤。',
+  '我选咒语就像伸手拿东西一样自然，想到适合的咒语就直接念。',
 ].join('\n')
 
 /**
@@ -88,7 +88,7 @@ const BASE_MAGIC_RULES = [
  * 位置比措辞敏感:必须始终是魔法段的**最后一行**。所以它不放进
  * BASE_MAGIC_RULES,而是由 magicText 在学到的咒语之后补上。
  */
-const THINKING_VOICE = '你怎么想的就怎么写,像自言自语,不用改成"用户想要……"那种旁观说法。'
+const THINKING_VOICE = '我怎么想就怎么写，用自己的第一人称自然地自言自语。'
 
 export function magicText({ learned = [] } = {}) {
   if (!learned.length) return `${BASE_MAGIC_RULES}\n${THINKING_VOICE}`
@@ -160,9 +160,10 @@ export class MainSessionScope {
    * @param {object} [options.logger]
    * @param {boolean} [options.chatOnly] 好友/群仅使用 QQ 预设，不读取人格记忆或展示咒语。
    */
-  constructor(agent, { currentPersona, learned = () => [], chatOnly = false, logger = console } = {}) {
+  constructor(agent, { currentPersona, currentAwareness = () => '', learned = () => [], chatOnly = false, logger = console } = {}) {
     this.agent = agent
     this.currentPersona = currentPersona ?? (() => '')
+    this.currentAwareness = currentAwareness
     this.learned = learned
     this.chatOnly = chatOnly
     this.logger = logger
@@ -276,6 +277,10 @@ export class MainSessionScope {
     // 主请求;规则里真正还有用的那一句下沉到增量材料 header(只在真有增量时出现)。
     const sections = []
     if (persona) sections.push({ name: PERSONA_SECTION, text: persona })
+    if (!this.chatOnly) {
+      const awareness = String(await this.currentAwareness(this.agent) ?? '')
+      if (awareness) sections.push({ name: 'rin-memory:awareness', text: awareness, interpolate: false })
+    }
     sections.push({ name: this.chatOnly ? 'rin-memory:chat' : MAGIC_SECTION,
       text: this.chatOnly ? THINKING_VOICE : magicText({ learned: this.learned() }), interpolate: false })
     // tools 恒为空:不是"过滤",而是明确不报送任何 schema——见 MAIN_SESSION_TOOLS

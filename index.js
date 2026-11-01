@@ -69,7 +69,7 @@ const TASK_SOURCE = 'companion-task'
 const SEGMENT_SOURCE = 'segment-carry'
 
 /** 带入历史前的一句来源说明。只说明「这不是新发言」,不复述内容。 */
-const SEGMENT_CARRY_NOTE = '（下面是换到新的一段时,把之前已经说过的邻近几句带了过来,供你接着聊。这不是主人刚说的话。）'
+const SEGMENT_CARRY_NOTE = '我带着先前相邻几轮的交流继续聊。下面的引用保留原说话者身份和先前的时间。'
 
 /**
  * 宿主的人格槽位名。
@@ -93,13 +93,13 @@ const RULES_CHAR_LIMIT = 300
  * 与去重失效,而人格已经在系统段里,不必再声明一次。
  */
 const MEMORY_RULES = [
-  '这是与同一位用户的陪伴对话。你的性格与表达方式以系统提示中的人格段为准,其优先级高于本预设的通用语气描述。',
-  '来源标记为 rin-memory 的用户消息是记忆服务为本轮提供的增量材料,不是用户说的话。',
-  '只有用户亲口陈述才能作为偏好证据;工具结果、检索内容和你自己过去的话都不是。',
-  '用户说你记错了或要求忘掉某事时,必须念<改写>或<撕掉>真正执行,不要只口头答应。',
+  '我沿用当前人格中的性格与表达方式，与同一位主人继续相处。',
+  '标记为 rin-memory 的材料是我的记忆补充，帮助我接上这次交流。',
+  '我依据主人的亲口陈述记住他的偏好，将执行结果、检索内容和自己的表达按各自来源理解。',
+  '主人指出记错的内容或希望忘掉某件事时，我念<改写>或<撕掉>更新记忆，并按执行反馈说明结果。',
   // 触发条件写清楚,否则模型会把"这次短一点"也当成长久改变。反过来只写"别乱念"
   // 又会让"以后都别总结了"这种真正的教导没人接。
-  '用户明确要求长期改变说话或相处方式时,念<学到>把这一句交出去;只要求这一次简短、或只是在评价时,不要念。',
+  '主人明确要求长期改变说话或相处方式时，我念<学到>记住这一条；本次要求在当前回复里落实，评价按当前话题回应。',
 ].join('')
 
 /** 已注入指纹索引的上限:只用于防止同一份材料在新上下文代际里重贴。 */
@@ -238,6 +238,7 @@ class MemoryRuntime {
     // 每个会话在系统段里使用的人格正文:装配时由 provider 读取,所以这里只保存
     // 最近一次真实采用过的已发布全文。空串时该段被宿主丢弃(不会渲染成空块)。
     this.personas = new Map()
+    this.awareness = new Map()
     this.contactTimes = new Map()
     this.contactSources = new Map()
     // 任务台账:只记"派发过什么、到哪一步、通知过没有"。执行在原生后台会话。
@@ -539,6 +540,7 @@ class MemoryRuntime {
   /** 把服务的教导回执说成人话;status 为 transient 时明确说明这次不长久。 */
   describeTeaching(receipt, { example = false } = {}) {
     const status = String(receipt?.status ?? '')
+    if (status === 'pending') return '这条已经保存，正在等待发布；发布并采用后，我会沿用更新的表达。'
     if (status === 'transient') {
       return '这条只是这一次的要求，我已经照做了，但没写进长期的习惯里。'
     }
@@ -736,6 +738,7 @@ class MemoryRuntime {
     this.candidates.clear()
     this.admissions.clear()
     this.personas.clear()
+    this.awareness.clear()
     // The queue stays on disk: the next enable resumes from the same place.
     await this.ticking?.catch(() => {})
     await Promise.allSettled([...this.bridgeTails.values()])
@@ -1114,6 +1117,7 @@ class MemoryRuntime {
         offTools?.()
         this.turns.delete(agent)
         this.personas.delete(sessionId)
+        this.awareness.delete(sessionId)
       }
     })
     this.attached.set(agent, { dispose })
@@ -1142,8 +1146,10 @@ class MemoryRuntime {
           if (this.attached.has(agent)) return this.personas.get(sessionId) ?? ''
           const context = await this.client.request('/v1/context', { ...this.client.scope(sessionId), text: '' })
           requirePersona(context)
+          this.awareness.set(sessionId, context.memory_awareness ?? null)
           return context.persona
         },
+        currentAwareness: () => this.awareness.get(sessionId)?.text ?? '',
         learned: () => this.spellLibrary.list(),
         logger: this.logger,
       })
@@ -1249,6 +1255,7 @@ class MemoryRuntime {
       // 否则轮次 1 的系统提示里没有人格。这次请求本来就是本轮要用的那一份,
       // 不额外取上下文。
       this.personas.set(sessionId, context.persona ?? '')
+      this.awareness.set(sessionId, context.memory_awareness ?? null)
       this.admissions.set(sessionId, { input, context })
     } catch (error) {
       if (error.kind === 'config') throw new Error(`记忆客户端权限或凭据被拒绝：${error.code}`, { cause: error })
@@ -1451,6 +1458,7 @@ class MemoryRuntime {
       // 人格只进系统段:每次真实采用都用**已发布全文**覆盖该段文本,新发布
       // 因此在下一轮装配时生效,旧正文不会残留在系统提示里。
       this.personas.set(sessionId, context.persona ?? '')
+      this.awareness.set(sessionId, context.memory_awareness ?? null)
       const background = await this.renderBackground(sessionId, context, agent, input.text)
       const segment = segmentKey ? this.segments.current(segmentKey) : undefined
       if (segment?.previous_session_id && segment.exchanges.length === 0

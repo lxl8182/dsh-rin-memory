@@ -584,9 +584,10 @@ test('新段第一次请求只带允许的东西:没有原生压缩摘要、没�
   // 干净输入:新会话日志里没有原生压缩摘要节点,带入也不引入 tools 字段。
   assert.ok(!JSON.stringify(decision.messages).includes('compact-checkpoint'), 'no native compaction summary')
   assert.equal(decision.tools, undefined, 'carry must not introduce a tools field')
-  // 带入的历史说清楚「这不是主人刚说的话」,模型不会误当新发言。
+  // 历史携带材料保留原说话者和先前时间。
   const carry = decision.messages.find(message => message.source?.kind === 'segment-carry')
-  assert.match(carry.content[0].text, /不是主人刚说的话/)
+  assert.match(carry.content[0].text, /先前相邻几轮/)
+  assert.match(carry.content[0].text, /原说话者身份和先前的时间/)
   assert.match(carry.content[0].text, /服务器/)
   await dispose()
 })
