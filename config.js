@@ -16,6 +16,7 @@ import { CONTACT_DEFAULTS, normalizeContact } from './contact.js'
  * @typedef {object} MemoryPluginConfig
  * @property {boolean} enabled 总开关。默认关闭:安装不等于启用。
  * @property {boolean} proactiveEnabled 是否启用插件联系计划与主动交流。
+ * @property {boolean} friendMemoryEnabled 好友私聊使用独立的事实记忆。
  * @property {string} url rin-memory 服务地址;只接受本机回环 HTTP。
  * @property {string} clientId 在服务端 stack.toml 里配置的客户端 id。
  * @property {string} characterId 读取记忆与人格的角色。
@@ -47,6 +48,7 @@ export const DEFAULT_CONFIG = {
   timeoutMs: 10000,
   sessionPrefixes: ['qq-'],
   memoryTools: true,
+  friendMemoryEnabled: false,
   proactiveEnabled: true,
   contact: { ...CONTACT_DEFAULTS },
   stateDirectory: '',
@@ -60,7 +62,7 @@ export const DEFAULT_CONFIG = {
   segment: { ...SEGMENT_DEFAULTS },
 }
 
-const BOOLEAN_FIELDS = ['enabled', 'memoryTools', 'retireSessionsOnCleanup', 'proactiveEnabled']
+const BOOLEAN_FIELDS = ['enabled', 'memoryTools', 'friendMemoryEnabled', 'retireSessionsOnCleanup', 'proactiveEnabled']
 const NUMBER_FIELDS = ['timeoutMs', 'maxPending', 'retryIntervalMs']
 const STRING_FIELDS = [
   'url', 'clientId', 'characterId', 'subject', 'pluginId',

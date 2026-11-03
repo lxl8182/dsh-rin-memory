@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { parseSpells } from './magic.js'
 import { messageText, contextReferences, sessionScopeId } from './memory-client.js'
-import { contactControls, parseContact, localClock, normalizeContact } from './contact.js'
+import { contactControls, parseContact, localClock, normalizeContact, ordinaryContactTime } from './contact.js'
 import { collectMaterials, rankMaterials, fingerprint } from './discovery.js'
 
 export const PROACTIVE_SOURCE = 'companion-proactive'
@@ -267,6 +267,15 @@ export class ProactiveRuntime {
         const initialize = !this.state.initialized[key]
         const newEvent = eligible.some(row => row.status === 'pending') && this.state.decisions[key] !== eventKey
         if (!due && !initialize && !newEvent) continue
+        if (!eligible.some(row => row.agreed)) {
+          const previous = this.state.opportunities?.[key]
+          const opportunity = ordinaryContactTime(now, this.config, this.state.activity[key], previous)
+          if (opportunity.not_before !== previous?.not_before) await this.save(state => {
+            state.opportunities ??= {}
+            state.opportunities[key] = opportunity
+          })
+          if (Date.parse(now) < Date.parse(opportunity.not_before)) continue
+        }
         if (!this.allowed(key, now, eligible)) {
           this.retryAt = Date.parse(now) + 60000
           continue
@@ -277,12 +286,13 @@ export class ProactiveRuntime {
         const run = { request_id, sessionId, binding: key, context, candidates: choices, now,
           plan_revision: plan?.revision, finishOutput }
         const previous = { initialized: this.state.initialized[key], decision: this.state.decisions[key],
-          statuses: choices.map(row => [row.candidate_id, row.status]) }
+          statuses: choices.map(row => [row.candidate_id, row.status]), opportunity: this.state.opportunities?.[key] }
         run.recovery = { ...previous, plan, due }
         try {
           await this.save(state => {
             state.initialized[key] = true
             state.decisions[key] = eventKey
+            delete state.opportunities?.[key]
             if (due) state.plans[key] = { ...state.plans[key], status: 'consumed', consumed_at: now }
             for (const row of choices) state.candidates[row.candidate_id].status = 'considered'
           })
@@ -457,6 +467,10 @@ export class ProactiveRuntime {
       if (!previous.initialized) delete state.initialized[key]
       if (previous.decision === undefined) delete state.decisions[key]
       else state.decisions[key] = previous.decision
+      if (previous.opportunity) {
+        state.opportunities ??= {}
+        state.opportunities[key] = previous.opportunity
+      }
       for (const [id, status] of previous.statuses) {
         if (state.candidates[id]?.status === 'considered') state.candidates[id].status = status
       }
@@ -509,15 +523,20 @@ export class ProactiveRuntime {
     clearTimeout(this.timer)
     if (this.runtime.stopped || !this.runtime.config.proactiveEnabled) return
     const now = Date.parse(this.now())
-    const times = Object.values(this.state.plans).filter(plan => {
-      if (plan.status !== 'scheduled') return false
+    const live = key => {
       const agent = [...this.runtime.attached.keys()].find(agent =>
-        this.runtime.bridge?.binding(agent.session.id)?.sessionKey === plan.session_binding)
+        this.runtime.bridge?.binding(agent.session.id)?.sessionKey === key)
       return Boolean(agent) && !this.busy.has(agent.session.id) && !this.active.has(agent.session.id)
-    })
-      .map(plan => Date.parse(plan.next_contact_at)).filter(Number.isFinite)
-    if (!times.length) return
-    const delay = Math.min(2147483647, Math.max(1000, Math.min(...times) - now, this.retryAt - now))
+    }
+    const opportunities = this.state.opportunities ?? {}
+    const times = Object.values(this.state.plans).filter(plan => plan.status === 'scheduled' && live(plan.session_binding))
+      .map(plan => Math.max(Date.parse(plan.next_contact_at), Date.parse(opportunities[plan.session_binding]?.not_before ?? '') || 0))
+    for (const [key, opportunity] of Object.entries(opportunities)) {
+      if (live(key) && this.state.plans[key]?.mode !== 'paused') times.push(Date.parse(opportunity.not_before))
+    }
+    const validTimes = times.filter(Number.isFinite)
+    if (!validTimes.length) return
+    const delay = Math.min(2147483647, Math.max(1000, Math.min(...validTimes) - now, this.retryAt - now))
     this.timer = setTimeout(() => { void this.tick() }, delay)
     this.timer.unref?.()
   }

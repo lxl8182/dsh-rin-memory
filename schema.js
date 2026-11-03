@@ -21,6 +21,10 @@ const Config = Schema.object({
     timezone: Schema.string().default(CONTACT_DEFAULTS.timezone),
     dailyLimit: Schema.number().default(CONTACT_DEFAULTS.dailyLimit),
     minGapMinutes: Schema.number().default(CONTACT_DEFAULTS.minGapMinutes),
+    ordinaryDelayMinMinutes: Schema.number().default(CONTACT_DEFAULTS.ordinaryDelayMinMinutes)
+      .description('普通主动搭话在可联系时间后随机等待的最少分钟数。'),
+    ordinaryDelayMaxMinutes: Schema.number().default(CONTACT_DEFAULTS.ordinaryDelayMaxMinutes)
+      .description('普通主动搭话随机等待的最多分钟数；明确约定不受影响。'),
     quietStart: Schema.number().default(CONTACT_DEFAULTS.quietStart),
     quietEnd: Schema.number().default(CONTACT_DEFAULTS.quietEnd),
     followupHours: Schema.number().default(CONTACT_DEFAULTS.followupHours),
@@ -62,6 +66,9 @@ const Config = Schema.object({
   memoryTools: Schema.boolean()
     .default(true)
     .description('允许对话内更正/遗忘。仍需服务端为该客户端授予 memory_tools。'),
+  friendMemoryEnabled: Schema.boolean()
+    .default(false)
+    .description('好友私聊保存和召回独立事实记忆，继续使用公共人格；需服务端授权对应 qq-friend:<QQ号> 范围。'),
   proactiveEnabled: Schema.boolean()
     .default(true)
     .description('允许已绑定的主人私聊接收有来源的主动消息；服务端需授权 memory_outputs。'),

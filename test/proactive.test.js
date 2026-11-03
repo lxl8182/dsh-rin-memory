@@ -1,11 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ProactiveRuntime } from '../proactive.js'
-import { contactControls, parseContact } from '../contact.js'
+import { contactControls, parseContact, normalizeContact, ordinaryContactTime } from '../contact.js'
 import { parseSpells } from '../magic.js'
 import { sessionScopeId } from '../memory-client.js'
 
-function harness({ state = { proactiveOutputs: {} }, sessionId = 'qq-test', outputs = new Map(), partial = false } = {}) {
+function harness({ state = { proactiveOutputs: {} }, sessionId = 'qq-test', outputs = new Map(), partial = false, contact = {} } = {}) {
   let now = '2026-10-29T04:00:00Z', first = partial, valid = true, turn = 0
   const calls = [], sent = [], followups = [], barriers = new Set()
   const binding = { owner: true, scope: 'private', sessionKey: 'private:42', userId: 42, input: '你好' }
@@ -15,7 +15,7 @@ function harness({ state = { proactiveOutputs: {} }, sessionId = 'qq-test', outp
   const session = { id: sessionId, events: [], snapshotEvents() { return this.events } }
   const agent = { session, followup: message => followups.push(message) }
   const runtime = { config: { proactiveEnabled: true, characterId: 'rin', subject: 'private',
-    contact: { sources: ['https://feeds.example.test/rss'] } }, stopped: false,
+    contact: { sources: ['https://feeds.example.test/rss'], ordinaryDelayMinMinutes: 0, ordinaryDelayMaxMinutes: 0, ...contact } }, stopped: false,
     logger: { warn() {} }, attached: new Map([[agent, {}]]), candidates: new Map(),
     personas: new Map(), turns: new Map(), isTrusted: () => true,
     client: { state, now: () => now, serial: fn => fn(), save: async () => {},
@@ -87,6 +87,49 @@ function harness({ state = { proactiveOutputs: {} }, sessionId = 'qq-test', outp
   return { runtime, context, agent, calls, sent, followups, outputs, barriers, complete,
     advance: ms => { now = new Date(Date.parse(now) + ms).toISOString() }, invalidate: () => { valid = false } }
 }
+
+test('ordinary contact waits once across restarts, respects quiet and quota, and leaves agreements punctual', async () => {
+  const config = normalizeContact()
+  const early = '2026-10-29T00:55:00Z'
+  for (const [sample, expected] of [[0, '2026-10-29T01:15:00.000Z'], [1, '2026-10-29T03:00:00.000Z']]) {
+    assert.equal(ordinaryContactTime(early, config, {}, undefined, () => sample).not_before, expected)
+  }
+  const first = ordinaryContactTime(early, config, {}, undefined, () => 0)
+  assert.deepEqual(ordinaryContactTime('2026-10-29T01:05:00Z', config, {}, first, () => { throw Error('rerolled') }), first)
+  assert.equal(ordinaryContactTime('2026-10-29T15:55:00Z', config, {}, undefined, () => 0).not_before,
+    '2026-10-30T01:15:00.000Z')
+  assert.equal(ordinaryContactTime('2026-10-29T02:00:00Z', config,
+    { last_proactive: '2026-10-29T01:45:00Z' }, undefined, () => 0).not_before, '2026-10-29T03:30:00.000Z')
+  assert.equal(ordinaryContactTime('2026-10-29T02:00:00Z', config,
+    { day: '2026-10-29', count: 2 }, undefined, () => 0).not_before, '2026-10-30T01:15:00.000Z')
+
+  const contact = { ordinaryDelayMinMinutes: 30, ordinaryDelayMaxMinutes: 30 }
+  const h = harness({ contact }), p = new ProactiveRuntime(h.runtime)
+  await p.tick()
+  assert.equal(h.followups.length, 0)
+  const opportunity = p.state.opportunities['private:42']
+  p.stop()
+  const reopened = harness({ contact, state: JSON.parse(JSON.stringify(h.runtime.client.state)) })
+  const restored = new ProactiveRuntime(reopened.runtime)
+  reopened.advance(29 * 60000)
+  await restored.tick()
+  assert.equal(reopened.followups.length, 0)
+  assert.deepEqual(restored.state.opportunities['private:42'], opportunity)
+  reopened.advance(60000)
+  await restored.tick()
+  assert.equal(reopened.followups.length, 1)
+  assert.equal(restored.state.opportunities['private:42'], undefined)
+  restored.stop()
+
+  const agreed = harness({ contact }), a = new ProactiveRuntime(agreed.runtime)
+  agreed.advance(12 * 3600000)
+  agreed.context.working_summary.sections.open_threads.items = [{ thread_id: 'appointment', text: '约好的提醒',
+    agreed_followup: true, followup_at: agreed.runtime.client.now() }]
+  await a.tick()
+  assert.equal(agreed.followups.length, 1)
+  assert.equal(a.active.get(agreed.agent.session.id).candidates[0].agreed, true)
+  a.stop()
+})
 
 test('chat clocks are sparse, refresh at midnight, and proactive clocks stay current', () => {
   const { runtime, agent, advance } = harness()

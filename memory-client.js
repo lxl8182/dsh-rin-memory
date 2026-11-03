@@ -199,11 +199,11 @@ export class MemoryClient {
 
   // -- scope -----------------------------------------------------------
 
-  scope(sessionId) {
+  scope(sessionId, subject = this.config.subject) {
     const c = this.config
     return {
       character_id: c.characterId,
-      subject: c.subject,
+      subject,
       session_id: sessionScopeId(sessionId),
       scene: `plugin:${c.pluginId}`,
     }

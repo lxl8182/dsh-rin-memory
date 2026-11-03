@@ -1097,7 +1097,7 @@ class MemoryRuntime {
     if (!agent?.session) return
     const sessionId = agent.session.id
     if (!this.config.sessionPrefixes.some(prefix => sessionId.startsWith(prefix))) return
-    if (!this.isTrusted(agent)) return
+    if (!this.memorySubject(sessionId)) return
     if (this.attached.has(agent)) return
     if (this.client.isRetired(sessionId)) {
       // A session that was retired for cleanup must not silently come back.
@@ -1106,13 +1106,16 @@ class MemoryRuntime {
     }
     const dispose = agent.ctx.effect(() => {
       const offStep = agent.ctx.on('agent/pre-step', (payload, next) => this.preStep(agent, payload, next))
+      const offEvent = !this.isTrusted(agent)
+        ? agent.ctx.on('session/event', (subject, event) => this.sessionEvent(agent, subject, event)) : undefined
       // 人格占据宿主的 deployment persona prefix 槽位:本 agent 作用域的同名段
       // 遮蔽外层(全局或预设)那一段,人格因此只作为系统提示出现一份。文本由
       // provider 提供,每次装配都读当前已发布正文,新发布在下一轮自动生效。
-      const offPrompt = this.registerPrompt(agent, sessionId)
+      const offPrompt = this.isTrusted(agent) ? this.registerPrompt(agent, sessionId) : undefined
       const offTools = this.registerTools(agent)
       return () => {
         offStep?.()
+        offEvent?.()
         offPrompt?.()
         offTools?.()
         this.turns.delete(agent)
@@ -1222,6 +1225,20 @@ class MemoryRuntime {
     return binding?.owner === true && binding.scope === 'private'
   }
 
+  memorySubject(sessionId) {
+    const binding = this.bridge?.binding?.(sessionId)
+    if (binding?.scope !== 'private') return undefined
+    if (binding.owner === true) return this.config.subject
+    if (this.config.friendMemoryEnabled && binding.owner === false && binding.userId !== undefined) {
+      return `qq-friend:${binding.userId}`
+    }
+    return undefined
+  }
+
+  memoryScope(sessionId) {
+    return this.client.scope(sessionId, this.memorySubject(sessionId))
+  }
+
   async prepareBridgeInput(input) {
     if (this.stopped) return
     if (!input.owner || input.scope !== 'private') {
@@ -1233,11 +1250,11 @@ class MemoryRuntime {
         this.chatScopes.set(agent, isolation)
       }
       input.chatOnlyReady = !!agent && this.chatScopes.has(agent)
-      return
+      if (!this.memorySubject(input.sessionId)) return
     }
     if (!input.sessionId) throw new Error('MEMORY_REQUIRED: 缺少 QQ 会话绑定')
     const sessionId = input.sessionId
-    await this.proactive.observe(input)
+    if (input.owner) await this.proactive.observe(input)
     this.client.state.sessions[sessionScopeId(sessionId)] = sessionId
     await this.client.save()
     const agent = this.candidates.get(sessionId)
@@ -1249,14 +1266,17 @@ class MemoryRuntime {
       if (Object.keys(this.client.state.pending).length + Object.keys(this.client.state.generated).length >= this.config.maxPending) {
         throw new Error('记忆补交队列已满，请恢复服务后重试')
       }
-      const context = await this.client.request('/v1/context', { ...this.client.scope(sessionId), text: input.input })
-      requirePersona(context)
+      const scope = this.memoryScope(sessionId)
+      const context = await this.client.request('/v1/context', { ...scope, text: input.input })
+      if (input.owner) requirePersona(context)
       // 系统段在 preStep 之前就装配好了,所以人格必须在这里(本轮开始前)就位,
       // 否则轮次 1 的系统提示里没有人格。这次请求本来就是本轮要用的那一份,
       // 不额外取上下文。
-      this.personas.set(sessionId, context.persona ?? '')
-      this.awareness.set(sessionId, context.memory_awareness ?? null)
-      this.admissions.set(sessionId, { input, context })
+      if (input.owner) {
+        this.personas.set(sessionId, context.persona ?? '')
+        this.awareness.set(sessionId, context.memory_awareness ?? null)
+      }
+      this.admissions.set(sessionId, { input, context, scope })
     } catch (error) {
       if (error.kind === 'config') throw new Error(`记忆客户端权限或凭据被拒绝：${error.code}`, { cause: error })
       throw new Error(`MEMORY_REQUIRED: ${error.message ?? error.code ?? '记忆服务连接异常'}`, { cause: error })
@@ -1396,7 +1416,7 @@ class MemoryRuntime {
   async ensureTurn(agent, payload) {
     if (this.stopped) return undefined
     const sessionId = agent.session.id
-    if (!this.isTrusted(agent)) throw new Error('MEMORY_REQUIRED: QQ 主人身份未绑定')
+    if (!this.memorySubject(sessionId)) throw new Error('MEMORY_REQUIRED: QQ 记忆身份未绑定')
     if (this.client.isRetired(sessionId)) throw new Error('MEMORY_REQUIRED: 原会话已清理，等待新会话')
     const existing = this.turns.get(agent)
     if (existing && existing.turn === payload.turn) {
@@ -1413,10 +1433,12 @@ class MemoryRuntime {
       throw new Error('MEMORY_REQUIRED: 记忆补交队列已满，请恢复服务后重试')
     }
     const binding = this.bridge.binding(sessionId)
+    const owner = binding.owner === true
+    const scope = this.memoryScope(sessionId)
     input.text = binding.input
     // 空闲计时只认真实用户互动:主动消息、后台任务与咒语反馈都不走这里。
     const segmentKey = binding.sessionKey
-    if (segmentKey) {
+    if (owner && segmentKey) {
       try {
         // 先建段再记时间:顺序反了的话,首次互动会落在「还没有段」的空态上,
         // 于是这一轮既不记账也不落盘,重启后本轮互动就丢了。
@@ -1433,14 +1455,14 @@ class MemoryRuntime {
     try {
       const admission = this.admissions.get(sessionId)
       this.admissions.delete(sessionId)
-      const context = admission?.input.input === input.text ? admission.context : await this.client.request('/v1/context', {
-        ...this.client.scope(sessionId),
+      const context = admission?.input.input === input.text && admission.scope?.subject === scope.subject ? admission.context : await this.client.request('/v1/context', {
+        ...scope,
         text: input.text,
       })
-      requirePersona(context)
+      if (owner) requirePersona(context)
       const consumed = contextReferences(context)
       await this.client.request('/v1/context/reserve', {
-        ...this.client.scope(sessionId),
+        ...scope,
         request_id: requestId,
         context_receipt_id: context.context_receipt_id,
         // QP05:登记"这一轮真的消费了哪些记忆 id"。网页来源的事实本身没有插件
@@ -1457,18 +1479,20 @@ class MemoryRuntime {
       })
       // 人格只进系统段:每次真实采用都用**已发布全文**覆盖该段文本,新发布
       // 因此在下一轮装配时生效,旧正文不会残留在系统提示里。
-      this.personas.set(sessionId, context.persona ?? '')
-      this.awareness.set(sessionId, context.memory_awareness ?? null)
+      if (owner) {
+        this.personas.set(sessionId, context.persona ?? '')
+        this.awareness.set(sessionId, context.memory_awareness ?? null)
+      }
       const background = await this.renderBackground(sessionId, context, agent, input.text)
       const segment = segmentKey ? this.segments.current(segmentKey) : undefined
-      if (segment?.previous_session_id && segment.exchanges.length === 0
+      if (owner && segment?.previous_session_id && segment.exchanges.length === 0
         && context.context?.followup?.status === 'resolved') {
         const note = await this.segmentNoteFor(segmentKey, sessionId)
         if (note) background.text = [background.text, note].filter(Boolean).join('\n\n')
       }
       const contactNow = this.client.now()
       this.contactTimes.set(sessionId, contactNow)
-      if (this.config.proactiveEnabled) {
+      if (owner && this.config.proactiveEnabled) {
         const clock = this.proactive.chatClockMaterial(sessionId, contactNow)
         const fingerprint = 'clock:' + stableHash(clock)
         if (clock && !this.client.state.injected[sessionScopeId(sessionId)]?.[fingerprint]) {
@@ -1478,17 +1502,17 @@ class MemoryRuntime {
       }
       const prepared = {
         requestId,
-        scope: this.client.scope(sessionId),
+        scope,
         contextReceiptId: context.context_receipt_id,
         personaVersion: context.persona_version ?? '',
         background: background.text,
         fingerprints: background.fingerprints,
         body: {
-          ...this.client.scope(sessionId),
+          ...scope,
           request_id: requestId,
           turn_id: requestId,
           source_key: buildSourceKey(
-            this.config.pluginId, this.config.characterId, this.config.subject,
+            this.config.pluginId, this.config.characterId, scope.subject,
             sessionScopeId(sessionId), requestId,
           ),
           occurred_at: this.client.now(),
@@ -1500,7 +1524,7 @@ class MemoryRuntime {
         },
         input: input.text,
       }
-      this.contactSources.set(sessionId, { source_key: prepared.body.source_key, refs: consumed.sources })
+      if (owner) this.contactSources.set(sessionId, { source_key: prepared.body.source_key, refs: consumed.sources })
       await this.client.serial(async () => {
         if (Object.keys(this.client.state.pending).length + Object.keys(this.client.state.generated).length >= this.config.maxPending) {
           throw new Error('记忆补交队列已满，请恢复服务后重试')
@@ -1526,7 +1550,7 @@ class MemoryRuntime {
       this.turns.set(agent, {
         turn: payload.turn, requestId, prepared, injected: false, reply: '',
       })
-      this.health.persona_version = prepared.personaVersion
+      if (owner) this.health.persona_version = prepared.personaVersion
       this.health.state = 'connected'
       this.health.detail = ''
       return prepared
@@ -1559,6 +1583,7 @@ class MemoryRuntime {
     const seen = this.client.state.injected[scopeId] ?? {}
     const history = agent?.session?.deriveMessages?.() ?? []
     return renderIncrement(context, seen, { scopeId,
+      friend: this.bridge?.binding(sessionId)?.owner === false,
       currentInput,
       representedText: history.filter(message => message.source?.kind !== MEMORY_SOURCE)
         .map(messageText).join('\n') })
@@ -1570,6 +1595,7 @@ class MemoryRuntime {
     if (subject !== agent.session && subject?.id !== agent.session?.id) return
     if (this.turns.get(agent)?.proactive && !event.type.startsWith('compaction/')) return
     if (event.type === 'assistant/message' && !event.data.interrupted) {
+      if (!this.isSpellSession(agent)) return
       void this.spellRunner.handleAssistantMessage(agent, event.data.message, event.seq)
         .catch(error => this.logger.warn?.(`[dsh-rin-memory] 咒语处理失败：${error.message}`))
       return
@@ -1691,13 +1717,13 @@ class MemoryRuntime {
   async processBridgeTurn(report) {
     if (this.stopped || !report) return
     if ((report.generationStatus ?? report.status) !== 'completed') return
-    if (!report.owner) return
+    if (!report.owner && !this.memorySubject(report.sessionId)) return
     if (report.scope !== 'private') return
     if (!report.sessionId) return
     if (this.client.isRetired(report.sessionId)) return
     if (!report.reply) return
-    if (report.parts?.some(part => part.ok)) await this.proactive.delivered(report)
-    const scope = this.client.scope(report.sessionId)
+    if (report.owner && report.parts?.some(part => part.ok)) await this.proactive.delivered(report)
+    const scope = this.memoryScope(report.sessionId)
     // The receipt must name the turn the save used. The bridge reports the DSH
     // user-message id; without it there is no honest key, so nothing is
     // recorded rather than guessing one and creating an orphan receipt.
@@ -1730,7 +1756,7 @@ class MemoryRuntime {
     // 这一段交换已经真的发到主人面前了,可以是未来换段时带入的历史。
     // 记在发送之后而不是生成时:没发出去的话不该进入新段的带入。
     try {
-      await this.recordSegmentExchange(report)
+      if (report.owner) await this.recordSegmentExchange(report)
     } catch (error) {
       this.logger.warn?.(`[dsh-rin-memory] 段历史记录失败：${error.message}`)
     }
@@ -2324,15 +2350,16 @@ function episodeEntries(context) {
  * 续接由服务端的召回与 followup 判定负责,不靠这里每轮复读。
  */
 export function renderIncrement(context, seen = {}, options = {}) {
+  const narrate = text => narrativeMemoryText(text, options.friend ? '朋友' : '主人')
   const query = typeof options.currentInput === 'string'
     ? options.currentInput.replace(/\[图片\d+[^\]]*\]/gu, '').trim() : undefined
   const minimal = context?.material_policy?.minimal === true || (query !== undefined
     && (!query || /^(?:在吗|你好|早|晚安|看看这张图|你看这个)[？?！!。]*$/u.test(query)))
   const represented = [context?.persona ?? '', options.representedText ?? '']
     .flatMap(text => String(text).split('\n'))
-    .map(text => stableText(narrativeMemoryText(text))).filter(Boolean)
+    .map(text => stableText(narrate(text))).filter(Boolean)
   const isRepresented = text => {
-    const clean = stableText(narrativeMemoryText(text))
+    const clean = stableText(narrate(text))
     return clean.length > 3 && represented.some(line => line.includes(clean))
   }
   const scopeId = options.scopeId ?? ''
@@ -2373,7 +2400,7 @@ export function renderIncrement(context, seen = {}, options = {}) {
   const recentEntries = fresh(recent.map((row, index) => ({
     text: (() => {
       const text = plain(row?.data ?? row).trim()
-      return text ? `${row?.type === 'human' ? '主人' : '我'}:${text}` : ''
+      return text ? `${row?.type === 'human' ? (options.friend ? '朋友' : '主人') : '我'}:${text}` : ''
     })(),
     fingerprint: turnFingerprint(row, index),
   })))
@@ -2445,15 +2472,15 @@ export function renderIncrement(context, seen = {}, options = {}) {
   // header 只在真有增量时出现:正常轮次(没有新增材料)完全没有任何附加消息。
   // 用记事标题区分回忆与主人本轮发言。
   const narrative = sections.map(section => section.startsWith('[近期对话]')
-    ? section : narrativeMemoryText(section)).join('\n\n')
+    ? section : narrate(section)).join('\n\n')
   return { text: `${MATERIAL_NOTE}\n${narrative}`, fingerprints }
 }
 
 /** 展示时使用角色视角；引号内保留原话，来源正文和指纹保持原样。 */
-export function narrativeMemoryText(text) {
+export function narrativeMemoryText(text, userName = '主人') {
   return String(text).split(/(“[^”]*”|「[^」]*」|『[^』]*』|"(?:\\.|[^"\\])*")/gu)
     .map((part, index) => index % 2 ? part : part
-      .replace(/^(\s*(?:[-•]\s*)?)用户(?=[\p{Script=Han}:：，。\s])/gmu, '$1主人')
+      .replace(/^(\s*(?:[-•]\s*)?)用户(?=[\p{Script=Han}:：，。\s])/gmu, (_, prefix) => prefix + userName)
       .replace(/^(\s*(?:[-•]\s*)?)助手(?=[\p{Script=Han}:：，。\s])/gmu, '$1我')
       .replace(/((?:其他|其它|别的|另一个|另一位)\s*)?助手的/gu,
         (phrase, other) => other ? phrase : '我的')

@@ -78,6 +78,7 @@ async function fixture(t, overrides = {}) {
         corrections: { block: '不要使用旧称呼' },
         context: { result: 'hit', context: '用户喜欢红茶', memory_ids: state.memoryIds ?? ['fact-1'] },
         recent_turns: [],
+        ...state.contextFor?.(body),
       }))
       return
     }
@@ -268,6 +269,60 @@ async function start(t, f, options = {}) {
   })
   return { ...hostHandle, dispose }
 }
+
+test('friend facts keep their subject, public persona and durable receipts across a new session and retry', async t => {
+  const f = await fixture(t, { contextFor: body => body.subject.startsWith('qq-friend:') ? {
+    persona: '', persona_version: '', card_revision: 0,
+    context: { context: `用户喜欢${body.subject.endsWith('42') ? '红茶' : '绿茶'}`, memory_ids: [body.subject] },
+  } : {} })
+  const h = await start(t, f, { config: { friendMemoryEnabled: true } })
+  async function friend(sessionId, userId, handle = h) {
+    const agent = makeAgent(sessionId)
+    agent.boundOwner = false
+    agent.autoReport = false
+    handle.ctx.emit('agent/created', { agent })
+    agent.ctx.tools.guard = () => () => {}
+    await handle.bridge.prepare({ sessionId, userId, owner: false, scope: 'private', input: '还记得我喜欢什么茶吗' })
+    return agent
+  }
+  const agent = await friend('qq-friend-first', 42)
+  const first = await agent.preStep({ turn: 1, step: 1, messages: [userMessage('friend-m1', '还记得我喜欢什么茶吗')] })
+  assert.equal(agent.sections.length, 0, 'the public preset is never replaced by the owner persona')
+  assert.equal(h.tools.length, 0, 'friends get no memory tools or spells')
+  const material = first.messages.find(row => row.source?.kind === 'rin-memory').content[0].text
+  assert.match(material, /朋友喜欢红茶/)
+  assert.doesNotMatch(material, /主人|温柔而直白/)
+  f.state.failTurns = 99
+  agent.turnEnd(1, [assistantEvent(1, '记得呀，你喜欢红茶。')])
+  h.bridge.publish({ status: 'completed', owner: false, scope: 'private', sessionId: agent.session.id,
+    turnMessageId: 'friend-m1', input: '还记得我喜欢什么茶吗', reply: '记得呀，你喜欢红茶。',
+    parts: [{ index: 0, text: '记得呀，你喜欢红茶。', ok: true, platformId: 'friend-send' }] })
+  for (let n = 0; n < 100 && !f.requests.some(row => row.path === '/v1/turns'); n++) await new Promise(resolve => setTimeout(resolve, 10))
+  await h.dispose()
+  f.state.failTurns = 0
+  const reopened = new MemoryClient(f.config, 'isolated-token', { statePath: join(f.root, 'outbox.json') })
+  await reopened.open()
+  await reopened.flush()
+  const submitted = f.requests.filter(row => row.path === '/v1/turns')
+  assert.equal(submitted.length, 2)
+  assert.deepEqual(submitted[0].body, submitted[1].body)
+  assert.equal(submitted[1].body.subject, 'qq-friend:42')
+  assert.match(submitted[1].body.source_key, /^plugin:dsh_memory:companion:qq-friend_42:/)
+  const receipts = f.requests.filter(row => row.path === '/v1/receipts')
+  assert.ok(receipts.some(row => row.body.kind === 'used'))
+  assert.ok(receipts.some(row => row.body.kind === 'sent'))
+  assert.ok(receipts.every(row => row.body.subject === 'qq-friend:42'))
+  assert.deepEqual(reopened.state.pending, {})
+
+  const nextHost = await start(t, f, { config: { friendMemoryEnabled: true } })
+  for (const [id, qq, tea] of [['qq-friend-new', 42, '红茶'], ['qq-other-friend', 43, '绿茶']]) {
+    const nextAgent = await friend(id, qq, nextHost)
+    const result = await nextAgent.preStep({ turn: 1, step: 1, messages: [userMessage(id, '还记得我喜欢什么茶吗')] })
+    assert.match(result.messages.find(row => row.source?.kind === 'rin-memory').content[0].text, new RegExp(tea))
+    const context = f.requests.filter(row => row.path === '/v1/context').at(-1)
+    assert.equal(context.body.subject, `qq-friend:${qq}`)
+  }
+})
 
 test('the persona lives in the system section; only new background is injected; one reply saved', async t => {
   const f = await fixture(t)
