@@ -296,7 +296,7 @@ test('friend facts keep their subject, public persona and durable receipts acros
   agent.turnEnd(1, [assistantEvent(1, '记得呀，你喜欢红茶。')])
   h.bridge.publish({ status: 'completed', owner: false, scope: 'private', sessionId: agent.session.id,
     turnMessageId: 'friend-m1', input: '还记得我喜欢什么茶吗', reply: '记得呀，你喜欢红茶。',
-    parts: [{ index: 0, text: '记得呀，你喜欢红茶。', ok: true, platformId: 'friend-send' }] })
+    parts: [{ index: 0, chars: 10, replyText: '记得呀，你喜欢红茶。', ok: true, platformId: 'friend-send' }] })
   for (let n = 0; n < 100 && !f.requests.some(row => row.path === '/v1/turns'); n++) await new Promise(resolve => setTimeout(resolve, 10))
   await h.dispose()
   f.state.failTurns = 0
@@ -1007,6 +1007,7 @@ test('only the trusted bridge final text is committed, even when platform sendin
   const saved = f.requests.find(row => row.path === '/v1/turns').body
   assert.deepEqual(saved.messages, [{ role: 'user', content: '你好' }])
   assert.equal(saved.reply, '你好。')
+  assert.equal(saved.reply_transport, 'qq')
 })
 
 test('missing required context blocks the native model boundary instead of falling through', async t => {

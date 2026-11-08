@@ -95,7 +95,15 @@ export function charCount(text) {
 }
 
 /** References supplied by recall and its working-summary layers. */
-export function contextReferences(context) {
+export function contextReferences(context, rendered) {
+  if (context.context?.selection?.version === 1) {
+    if (rendered) return rendered
+    const items = context.context.selection.items ?? []
+    return {
+      ids: [...new Set(items.map(item => item.id).filter(Boolean))],
+      sources: [...new Set(items.flatMap(item => item.source_keys ?? []))],
+    }
+  }
   const ids = new Set(context.context?.memory_ids ?? [])
   const sources = new Set(context.context?.source_ids ?? [])
   for (const section of Object.values(context.working_summary?.sections ?? {})) {
@@ -344,7 +352,8 @@ export class MemoryClient {
           kind: 'sent',
           consumer: 'dsh_chat',
           transport: record.transport,
-          parts: record.parts.map(({ platform_id, chars }) => ({ platform_id, chars })),
+          parts: record.parts.map(({ platform_id, chars, index, text }) =>
+            typeof text === 'string' ? { platform_id, chars, index, text } : { platform_id, chars }),
         })
         this.state.accepted[turnKey] = [...(this.state.accepted[turnKey] ?? []), ...record.parts.map(part => JSON.stringify(part))]
         delete this.state.sent[turnKey]
@@ -397,7 +406,8 @@ export class MemoryClient {
   async recordSent(turnMessageId, scope, { transport, parts }) {
     const accepted = parts
       .filter(part => part.ok)
-      .map(part => ({ platform_id: part.platformId ?? '', chars: part.chars, index: part.index }))
+      .map(part => ({ platform_id: part.platformId ?? '', chars: part.chars, index: part.index,
+        ...(typeof part.replyText === 'string' && part.replyText.trim() ? { text: part.replyText } : {}) }))
     if (accepted.length === 0) return
     await this.serial(async () => {
       const known = this.state.accepted[turnMessageId] ?? []
@@ -425,7 +435,8 @@ export class MemoryClient {
       kind: 'sent',
       consumer: 'dsh_chat',
       transport: record.transport,
-      parts: record.parts.map(({ platform_id, chars }) => ({ platform_id, chars })),
+      parts: record.parts.map(({ platform_id, chars, index, text }) =>
+        typeof text === 'string' ? { platform_id, chars, index, text } : { platform_id, chars }),
     })
     this.state.accepted[requestId] = [...(this.state.accepted[requestId] ?? []), ...record.parts.map(part => JSON.stringify(part))]
     delete this.state.sent[requestId]

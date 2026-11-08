@@ -4,15 +4,18 @@ import { MemoryRuntime } from '../index.js'
 import { normalizeConfig } from '../config.js'
 import { MainSessionScope } from '../main-session.js'
 
-test('friend and group chat use preset persona and full history without memory, spells or compaction', async () => {
+test('friend and group chat keep separate public voices and tool isolation with memory off', async () => {
   const f = fixture()
-  f.runtime.client.request = async () => { throw new Error('plain chat must never call memory') }
+  f.runtime.client.request = async path => {
+    assert.equal(path, '/v1/qq/persona')
+    return { text: '铃芽的好友私聊人设' }
+  }
   f.runtime.bridge = { binding: id => ({ owner: id === 'qq-group', scope: id === 'qq-group' ? 'group' : 'private' }) }
   const history = Array.from({ length: 80 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `message-${index}` }))
   for (const id of ['qq-friend-a', 'qq-friend-b', 'qq-group']) {
     const main = f.agent(id)
     f.runtime.observeAgent(main)
-    const admission = { sessionId: id, owner: id === 'qq-group', scope: id === 'qq-group' ? 'group' : 'private' }
+    const admission = { sessionId: id, owner: id === 'qq-group', scope: id === 'qq-group' ? 'group' : 'private', userId: 42 }
     await f.runtime.prepareBridgeInput(admission)
     assert.equal(admission.chatOnlyReady, true)
     const scope = f.runtime.chatScopes.get(main)
@@ -24,7 +27,7 @@ test('friend and group chat use preset persona and full history without memory, 
     assert.equal(shaped.messages.length, 80)
     assert.deepEqual(shaped.tools, [])
     assert.deepEqual(shaped.contexts, [])
-    assert.equal(shaped.sections[0].text, '公开的QQ角色')
+    assert.equal(shaped.sections[0].text, id === 'qq-group' ? '公开的QQ角色' : '铃芽的好友私聊人设')
     assert.doesNotMatch(JSON.stringify(shaped.sections), /魔法|读取|翻本子|执行|工作说明|本地完整人格/)
     assert.equal(f.runtime.spellScopes.has(main), false)
     assert.equal(f.runtime.attached.has(main), false)

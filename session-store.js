@@ -172,7 +172,8 @@ export function estimateTokens(text) {
   let wide = 0
   let narrow = 0
   for (const char of text) {
-    if (WIDE_CHAR.test(char)) wide += 1
+    if (char.length > 1) wide += 2
+    else if (WIDE_CHAR.test(char)) wide += 1
     else narrow += 1
   }
   return wide + Math.ceil(narrow / 4)
@@ -180,6 +181,8 @@ export function estimateTokens(text) {
 
 /** 一条消息本身的角色与分帧开销;与正文长度无关,按条计。 */
 const MESSAGE_OVERHEAD = 4
+export const IMAGE_TOKENS = 2048
+export const OUTPUT_HEADROOM = 4096
 
 /** 一次完整交换(主人一句 + 铃芽一句)的估算 token。 */
 export function exchangeTokens(exchange) {
@@ -194,14 +197,13 @@ export function exchangeTokens(exchange) {
  * 因此可以只用纯函数测试固定住行为。
  *
  * 触发顺序:
- * 1. `hard` —— 硬上限,绕开 `minTurns`,防止单条超长文本或大图把上限冲破;
- * 2. `budget` —— 软上限,本轮结束后换段,是正常长聊的主路径;
- * 3. `idle` —— 真实用户停手达到 `idleHours`,跨天不回放无关旧话;
+ * 1. `idle` —— 真实用户停手达到 `idleHours`，下一次输入按话题衔接;
+ * 2. `hard` —— 硬上限，绕开 `minTurns`，给长文字与图片预留空间;
+ * 3. `budget` —— 加入本轮输入与输出余量后触及软上限;
  * 4. `age` —— 段龄达到 `maxAgeDays`。**仅空闲时生效**:判定只发生在
  *    「上一轮已结束、下一次进模型之前」这一个时刻,永远不会打断正在进行的回合。
  *
- * 第 2—4 条都要求本段已有 `minTurns` 次完整交换,否则一个刚开的段会被立刻
- * 再换一次(抖动),用户会看到上下句接不上。
+ * 软预算和段龄要求本段已有 `minTurns` 次完整交换。
  *
  * @param {object|null|undefined} record 段状态;缺失表示还没有段。
  * @param {object} options
@@ -209,15 +211,16 @@ export function exchangeTokens(exchange) {
  * @param {object} [options.limits] 参数覆盖;缺省用 {@link SEGMENT_DEFAULTS}。
  * @returns {null | 'hard' | 'budget' | 'idle' | 'age'} 换段原因;不换返回 null。
  */
-export function segmentSwitchReason(record, { now, limits = SEGMENT_DEFAULTS } = {}) {
+export function segmentSwitchReason(record, { now, limits = SEGMENT_DEFAULTS, forecast } = {}) {
   if (!record) return null
-  const tokens = Number(record.tokens ?? 0)
+  const tokens = forecast?.tokens ?? Number(record.tokens ?? 0)
+  const hard = forecast?.hard ?? limits.hardTokens
   const exchanges = Array.isArray(record.exchanges) ? record.exchanges.length : 0
-  if (tokens >= limits.hardTokens) return 'hard'
   const lastUser = Number(record.last_user_at ?? 0)
-  if (Number.isFinite(lastUser) && now - lastUser >= limits.idleHours * HOUR_MS) return 'idle'
+  if (lastUser > 0 && now - lastUser >= limits.idleHours * HOUR_MS) return 'idle'
+  if (tokens >= hard && (exchanges > 0 || forecast?.hasHistory)) return 'hard'
   if (exchanges < limits.minTurns) return null
-  if (tokens >= limits.budgetTokens) return 'budget'
+  if (tokens >= Math.min(limits.budgetTokens, hard * limits.budgetTokens / limits.hardTokens)) return 'budget'
   const started = Number(record.started_at ?? 0)
   if (Number.isFinite(started) && started > 0 && now - started >= limits.maxAgeDays * DAY_MS) return 'age'
   return null
@@ -236,19 +239,34 @@ export function segmentSwitchReason(record, { now, limits = SEGMENT_DEFAULTS } =
  * @param {object} [limits]
  * @returns {{ exchanges: Array<object>, tokens: number }} 带入的交换与其估算 token。
  */
-export function selectCarry(record, limits = SEGMENT_DEFAULTS) {
+export function selectCarry(record, limits = SEGMENT_DEFAULTS, anchors = []) {
   const all = Array.isArray(record?.exchanges) ? record.exchanges : []
   const picked = []
+  const preferred = new Set(anchors)
+  const newest = all.map((_, index) => all.length - index - 1)
+  const order = anchors.length ? newest.sort((a, b) =>
+    Number(preferred.has(all[b].source_key)) - Number(preferred.has(all[a].source_key))) : newest
   let tokens = 0
-  for (let index = all.length - 1; index >= 0; index--) {
+  for (const index of order) {
     if (picked.length >= limits.carryTurns) break
     const exchange = all[index]
     const cost = exchangeTokens(exchange)
-    if (tokens + cost > limits.carryTokens) break
-    picked.unshift(exchange)
+    if (tokens + cost > limits.carryTokens) continue
+    picked.push(index)
     tokens += cost
   }
-  return { exchanges: picked, tokens }
+  return { exchanges: picked.sort((a, b) => a - b).map(index => all[index]), tokens }
+}
+
+export function estimateMessages(messages = []) {
+  return messages.reduce((total, message) => {
+    const content = message.content
+    if (typeof content === 'string') return total + MESSAGE_OVERHEAD + estimateTokens(content)
+    return total + MESSAGE_OVERHEAD + (content ?? []).reduce((sum, block) => {
+      if (block.type === 'image' && !block.offloaded) return sum + IMAGE_TOKENS
+      return sum + estimateTokens(block.text ?? JSON.stringify(block))
+    }, 0)
+  }, 0)
 }
 
 /** 一段带入历史的可读正文;对话双方都用真实角色,不额外加说明段以外的装饰。 */
@@ -344,33 +362,50 @@ export class SegmentStore {
    * 只有「主人一句 + 铃芽实际发出去的一句」都确定时才记——半轮没有可带入的
    * 价值,记进去还会让 carry 的来源与真实发生过的话对不上。
    */
-  async recordExchange(sessionKey, { user, reply, at = this.now(), turns }) {
+  async recordExchange(sessionKey, { user, reply, at = this.now(), turns, sourceKey, sessionId, requestContext }) {
     const text = String(user ?? '').trim()
     const answer = String(reply ?? '').trim()
     if (!text || !answer) return
     await this.serial(async () => {
       const record = this.segments[sessionKey] ?? this.blank(sessionKey, at)
-      record.exchanges.push({ at, user: text, reply: answer })
-      record.tokens = record.exchanges.reduce((sum, item) => sum + exchangeTokens(item), 0)
-      record.last_user_at = at
+      if (sessionId && record.session_id !== sessionId) return
+      const exchange = { at, user: text, reply: answer, ...(sourceKey ? { source_key: sourceKey } : {}) }
+      const index = sourceKey ? record.exchanges.findIndex(item => item.source_key === sourceKey) : -1
+      if (index < 0) {
+        record.exchanges.push(exchange)
+        record.tokens += exchangeTokens(exchange)
+      } else {
+        const previous = record.exchanges[index]
+        if (previous.reply === answer || previous.reply.length > answer.length) return
+        record.exchanges[index] = { ...exchange, at: previous.at }
+        record.tokens += exchangeTokens(exchange) - exchangeTokens(previous)
+      }
+      if (!sessionId) record.last_user_at = Math.max(record.last_user_at, at)
       if (Number.isFinite(turns)) record.turns = turns
+      if (requestContext?.model) record.request_context = requestContext
       this.segments[sessionKey] = record
       await this.save()
     })
   }
 
   /** 新开一段:换 id、重置计时与累计,并把 DSH 会话 id 换成新的那个。 */
-  async begin(sessionKey, { sessionId, reason, at = this.now() } = {}) {
+  async begin(sessionKey, { sessionId, previousSessionId, reason, handoff, at = this.now() } = {}) {
     let record
     await this.serial(async () => {
       const previous = this.segments[sessionKey]
-      record = {
+      // The bridge may have resumed the old ID if it stopped before writing
+      // the new one into its delivery queue. Keep the staged handoff intact.
+      record = previousSessionId && previous?.previous_session_id === previousSessionId
+        && previous.handoff && !previous.handoff.adopted && !previous.handoff.deferred
+        ? { ...previous, session_id: sessionId } : {
         ...this.blank(sessionKey, at),
         session_id: sessionId ?? '',
         previous_segment_id: previous?.segment_id ?? '',
         previous_session_id: previous?.session_id ?? '',
         previous_last_user_at: previous?.last_user_at ?? 0,
         reason: reason ?? '',
+        ...(previous?.request_context ? { request_context: previous.request_context } : {}),
+        ...(handoff?.exchanges.length ? { handoff } : {}),
       }
       this.segments[sessionKey] = record
       await this.save()
@@ -378,25 +413,63 @@ export class SegmentStore {
     return record
   }
 
-  /** 把段绑定到当前 DSH 会话 id;重启后据此确认宿主是否还在同一会话上。 */
-  async bind(sessionKey, sessionId) {
+  async adoptCarry(sessionKey, segmentId, sources) {
     await this.serial(async () => {
       const record = this.segments[sessionKey]
-      if (!record) return
-      if (record.session_id === sessionId) return
-      record.session_id = sessionId
-      await this.save()
+      if (record?.segment_id !== segmentId || !record.handoff || record.handoff.adopted) return
+      const previous = record.handoff
+      const exchanges = previous.exchanges.filter(item => sources.includes(item.source_key))
+      if (previous.mode === 'topic' && !exchanges.length) {
+        if (previous.deferred) return
+        record.handoff = { ...previous, deferred: true }
+      } else {
+        record.handoff = { ...previous, adopted: true, exchanges }
+      }
+      try { await this.save() }
+      catch (error) { record.handoff = previous; throw error }
+    })
+  }
+
+  async forget(sources, sessions) {
+    const removed = new Set(sources)
+    const retired = new Set(sessions)
+    await this.serial(async () => {
+      const previous = this.segments
+      const next = { ...previous }
+      let changed = false
+      for (const [key, record] of Object.entries(previous)) {
+        if (retired.has(record.session_id)) {
+          delete next[key]
+          changed = true
+          continue
+        }
+        const exchanges = record.exchanges.filter(item => !removed.has(item.source_key))
+        const handoff = record.handoff
+        const carry = handoff?.exchanges.filter(item => !removed.has(item.source_key))
+        if (exchanges.length !== record.exchanges.length || carry?.length !== handoff?.exchanges.length) {
+          next[key] = { ...record, exchanges, tokens: exchanges.reduce((sum, item) => sum + exchangeTokens(item), 0),
+            ...(handoff ? { handoff: { ...handoff, exchanges: carry } } : {}) }
+          changed = true
+        }
+      }
+      if (!changed) return
+      this.segments = next
+      try { await this.save() }
+      catch (error) { this.segments = previous; throw error }
     })
   }
 
   /** 判定当前是否该换段;返回原因或 null。 */
-  switchReason(sessionKey, now = this.now()) {
-    return segmentSwitchReason(this.segments[sessionKey], { now, limits: this.limits })
+  switchReason(sessionKey, now = this.now(), forecast) {
+    return segmentSwitchReason(this.segments[sessionKey], { now, limits: this.limits, forecast })
   }
 
   /** 按参数挑出要带进新段的交换。 */
   carry(sessionKey) {
-    return selectCarry(this.segments[sessionKey], this.limits)
+    const record = this.segments[sessionKey]
+    const inherited = record?.handoff?.adopted ? record.handoff.exchanges : []
+    return selectCarry({ exchanges: [...inherited, ...(record?.exchanges ?? [])]
+      .filter(item => item.source_key).sort((a, b) => a.at - b.at) }, this.limits)
   }
 
   blank(sessionKey, at = this.now()) {

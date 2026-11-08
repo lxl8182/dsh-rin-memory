@@ -20,9 +20,10 @@ import { configProblems, normalizeConfig } from './config.js'
 import { randomUUID } from 'node:crypto'
 import { ProactiveRuntime, PROACTIVE_SOURCE } from './proactive.js'
 import {
-  SEGMENT_DEFAULTS, SegmentStore, deleteSessionDirectory, listSessionDirectories, renderCarry,
+  IMAGE_TOKENS, OUTPUT_HEADROOM, SEGMENT_DEFAULTS, SegmentStore, deleteSessionDirectory,
+  estimateMessages, estimateTokens, listSessionDirectories, renderCarry, selectCarry,
 } from './session-store.js'
-import { MATERIAL_NOTE, MainSessionScope } from './main-session.js'
+import { MAGIC_RULES, MATERIAL_NOTE, MainSessionScope } from './main-session.js'
 import { readSpell, spellToGoal } from './magic-tools.js'
 import { renderFeedback } from './magic.js'
 import { TaskStore } from './task-store.js'
@@ -69,7 +70,8 @@ const TASK_SOURCE = 'companion-task'
 const SEGMENT_SOURCE = 'segment-carry'
 
 /** 带入历史前的一句来源说明。只说明「这不是新发言」,不复述内容。 */
-const SEGMENT_CARRY_NOTE = '我带着先前相邻几轮的交流继续聊。下面的引用保留原说话者身份和先前的时间。'
+const SEGMENT_CARRY_NOTE = '以下是先前聊过的原话，保留当时的说话者和顺序。'
+const SEGMENT_RESUME = /昨天|昨晚|前天|上次|上回|之前|先前|还记得|接着|继续|原话|yesterday|last time|continue|pick up/i
 
 /**
  * 宿主的人格槽位名。
@@ -234,6 +236,7 @@ class MemoryRuntime {
     this.toolDisposers = []
     this.candidates = new Map()
     this.admissions = new Map()
+    this.friendMemoryGrants = new Map()
     this.bridgeTails = new Map()
     // 每个会话在系统段里使用的人格正文:装配时由 provider 读取,所以这里只保存
     // 最近一次真实采用过的已发布全文。空串时该段被宿主丢弃(不会渲染成空块)。
@@ -258,7 +261,6 @@ class MemoryRuntime {
       logger,
     })
     // 新段第一次请求要带进去的旧话,按 QQ 来源键暂存到真正用掉为止。
-    this.segmentCarry = new Map()
     this.spellLibrary = new SpellLibrary({ statePath: join(dirname(this.statusPath), 'spells.json') })
     this.spellRunner = new SpellRunner({
       logger,
@@ -737,6 +739,7 @@ class MemoryRuntime {
     this.turns.clear()
     this.candidates.clear()
     this.admissions.clear()
+    this.friendMemoryGrants.clear()
     this.personas.clear()
     this.awareness.clear()
     // The queue stays on disk: the next enable resumes from the same place.
@@ -751,6 +754,7 @@ class MemoryRuntime {
   async probe() {
     try {
       const health = await this.client.request('/v1/health', {}, 'GET')
+      if (typeof health.memory_enabled === 'boolean') this.memoryEnabled = health.memory_enabled
       // Health alone answers "is the service reachable and is its storage
       // ready". A context read here would mint an unused receipt on every
       // startup and every retry, so the persona version is learned from the
@@ -826,6 +830,11 @@ class MemoryRuntime {
       const sessions = this.sessionsForDeletion(item)
       const cleaned = []
       const problems = []
+      try {
+        await this.segments.forget(item.source_keys ?? [], sessions)
+      } catch (error) {
+        problems.push({ reason: error.message, kind: 'segment_history' })
+      }
       for (const scopeId of sessions) {
         const sessionId = this.sessionIdForScope(scopeId) ?? scopeId
         try {
@@ -902,7 +911,7 @@ class MemoryRuntime {
       const parts = text.split(':')
       // plugin:<plugin>:<character>:<subject>:<session>:<event>
       if (parts[0] === 'plugin' && parts.length === 6 && parts[1] === this.config.pluginId
-          && parts[2] === this.config.characterId && parts[3] === this.config.subject && parts[4]) found.add(parts[4])
+          && parts[2] === this.config.characterId && parts[4]) found.add(parts[4])
       // An episode id may embed the session as its last segment.
       else if (parts.length === 4 && parts[0] === 'ep' && parts[1] === 'plugin'
           && parts[2] === this.config.pluginId && parts[parts.length - 1]) {
@@ -979,18 +988,65 @@ class MemoryRuntime {
    * @param {string} sessionId 换段前这一轮本来要用的 DSH 会话 id(未建会话时为空串)。
    * @returns {string|undefined} 需要换段时返回原因(写进状态与日志)。
    */
-  segmentSwitchReason(sessionKey, sessionId) {
+  segmentSwitchReason(sessionKey, sessionId, input, requestLimits) {
     if (this.stopped || !sessionKey) return undefined
     const record = this.segments.current(sessionKey)
     // 还没有段:这不是「换段」,是首次记账。桥接层不需要释放会话。
     if (!record) return undefined
-    // 宿主换了会话(重启、手工 /new-session、切目录)而我们还记着旧的:直接把段绑到
-    // 新会话上,不算一次换段 —— 否则会把「宿主已经换过」误记成「段该换」并再换一次。
+    // 手工切会话后由下一条真实入站建立段，沿用 QQ 来源键。
     if (record.session_id && sessionId && record.session_id !== sessionId) {
-      void this.segments.bind(sessionKey, sessionId).catch(() => {})
-      return undefined
+      const staged = record.handoff
+      return record.previous_session_id === sessionId && staged && !staged.adopted && !staged.deferred
+        ? record.reason : undefined
     }
-    return this.segments.switchReason(sessionKey) ?? undefined
+    if (!input) return this.segments.switchReason(sessionKey) ?? undefined
+    const session = this.candidates.get(sessionId)?.session
+    const usage = session?.snapshotEvents?.().findLast(event => event.type === 'assistant/message')?.data.usage
+    const { hard, reserve } = requestLimits
+      ?? this.segmentRequestLimits(session, record, this.candidates.get(sessionId)?.model?.current?.())
+    const messages = session?.deriveMessages?.()
+    const header = session?.requestHeader?.()
+    const surface = estimateMessages(messages) + estimateTokens(JSON.stringify(header?.tools ?? []))
+    const previous = usage && Number.isFinite(usage.inputTokens)
+      ? (usage.totalTokens ?? usage.inputTokens + (usage.cacheReadTokens ?? 0)
+        + (usage.cacheWriteTokens ?? 0) + (usage.outputTokens ?? 0)) : 0
+    const tokens = Math.max(surface, previous, record.tokens) + estimateTokens(input.text)
+      + (input.imageCount ?? 0) * IMAGE_TOKENS + reserve
+    const hasHistory = messages?.some(message => message.role === 'assistant' || message.source?.kind === 'user')
+    return this.segments.switchReason(sessionKey, undefined, { hard, tokens, hasHistory }) ?? undefined
+  }
+
+  segmentRequestLimits(session, record, selection, resolvedWindow) {
+    const context = [session?.requestContext?.(), record?.request_context].find(item => item
+      && (!selection || (item.provider === selection.provider && item.model === selection.model)))
+    const window = resolvedWindow ?? context?.contextWindow
+    const hard = window > 0 ? Math.min(window, this.segments.limits.hardTokens) : this.segments.limits.hardTokens
+    const reserve = Math.min(session?.requestHeader?.()?.config?.maxTokens ?? OUTPUT_HEADROOM, OUTPUT_HEADROOM)
+    return { hard, reserve, knownRoute: Boolean(context || resolvedWindow) }
+  }
+
+  async resolveSegmentLimits(agent, record, selection, signal) {
+    const limits = this.segmentRequestLimits(agent?.session, record, selection)
+    if (limits.knownRoute || !selection) return limits
+    const llm = agent?.ctx?.llm ?? this.ctx.get?.('llm')
+    if (!llm?.resolveModelInfo) return limits
+    try {
+      const model = await llm.resolveModelInfo(selection.provider, selection.model, signal)
+      return this.segmentRequestLimits(agent.session, record, selection, model.context?.contextWindow)
+    } catch (error) {
+      if (signal?.aborted) throw error
+      this.logger.warn?.(`[dsh-rin-memory] 读取模型上下文窗口失败：${error.message}`)
+      return limits
+    }
+  }
+
+  segmentSpace(agent, messages, persona, limits) {
+    const surface = agent.session.deriveMessages?.() ?? []
+    const header = agent.session.requestHeader?.()
+    const system = surface.some(message => message.role === 'system') ? 0
+      : estimateTokens(persona) + estimateTokens(MAGIC_RULES)
+    return limits.hard - limits.reserve - system - estimateMessages(surface) - estimateMessages(messages)
+      - estimateTokens(JSON.stringify(header?.tools ?? []))
   }
 
   /**
@@ -1001,17 +1057,17 @@ class MemoryRuntime {
    */
   async onSegmentSwitched(sessionKey, { previousSessionId, sessionId, reason } = {}) {
     if (this.stopped || !sessionKey) return
-    const carry = ['idle', 'age'].includes(reason) ? { exchanges: [] } : this.segments.carry(sessionKey)
-    const text = carry.exchanges.length > 0 ? renderCarry(carry.exchanges) : ''
-    await this.segments.begin(sessionKey, { sessionId, reason })
-    this.segmentCarry.delete(sessionKey)
-    if (text) this.segmentCarry.set(sessionKey, text)
+    const exchanges = reason === 'memory-off' ? [] : this.segments.carry(sessionKey).exchanges
+    await this.segments.begin(sessionKey, { sessionId,
+      previousSessionId: reason === 'memory-off' ? undefined : previousSessionId, reason, handoff: {
+      mode: ['idle', 'age'].includes(reason) ? 'topic' : 'budget', exchanges,
+    } })
     if (sessionId) {
       await this.resetInjected(sessionId).catch(error => {
         this.logger.warn?.(`[dsh-rin-memory] 换段后注入索引重置失败：${error.message}`)
       })
     }
-    this.logger.info?.(`[dsh-rin-memory] 段已换（${reason || 'unknown'}）: ${previousSessionId || '(none)'} -> ${sessionId || '(none)'},带入 ${carry.exchanges.length} 轮`)
+    this.logger.info?.(`[dsh-rin-memory] 段已换（${reason || 'unknown'}）: ${previousSessionId || '(none)'} -> ${sessionId || '(none)'},候选 ${exchanges.length} 轮`)
   }
 
   /** 让段绑定到当前 DSH 会话 id;重启后据此判断宿主是否还在同一会话上。 */
@@ -1022,30 +1078,70 @@ class MemoryRuntime {
       await this.segments.begin(sessionKey, { sessionId, reason: 'initial' })
       return
     }
-    if (record.session_id !== sessionId) await this.segments.bind(sessionKey, sessionId)
+    if (record.session_id !== sessionId) await this.segments.begin(sessionKey, { sessionId, reason: 'host' })
   }
 
-  /** 取走新段第一次请求要带的旧话;没有则返回空串。取走即清空,只带一次。 */
-  takeSegmentCarry(sessionKey) {
-    const pending = this.segmentCarry.get(sessionKey)
-    if (pending === undefined) return ''
-    this.segmentCarry.delete(sessionKey)
-    return pending
+  async turnContext(scope, text, sessionKey, sessionId) {
+    const record = this.segments.current(sessionKey)
+    const handoff = record?.session_id === sessionId ? record.handoff : undefined
+    const history = handoff && !handoff.adopted && handoff.exchanges.length
+      && (!handoff.deferred || SEGMENT_RESUME.test(text)) ? {
+      mode: handoff.mode,
+      exchanges: handoff.exchanges.map(({ source_key, user, reply }) => ({ source_key, user, reply })),
+    } : undefined
+    if (history) {
+      // The previous reply is already on QQ. Finish its queued save before
+      // asking RIN to authorize that source for the next session.
+      await Promise.allSettled(history.exchanges.map(item => this.bridgeTails.get(item.source_key.split(':').at(-1))))
+    }
+    return this.client.request('/v1/context', { ...scope, text, ...(history ? { segment_history: history } : {}) })
+  }
+
+  approvedSegmentCarry(record, context) {
+    const handoff = record?.handoff
+    if (!handoff || handoff.adopted) return
+    const approved = new Set(context.context?.segment_sources ?? [])
+    if (handoff.deferred && !approved.size) return
+    const anchors = (context.context?.segment_anchors ?? []).filter(key => approved.has(key))
+    const { carryTurns, carryTokens } = this.segments.limits
+    const detail = context.context?.segment_detail === true
+    return {
+      segmentId: record.segment_id,
+      anchors,
+      exchanges: selectCarry({ exchanges: handoff.exchanges.filter(item => approved.has(item.source_key)) }, {
+        carryTurns: handoff.mode === 'topic' ? Math.min(carryTurns, detail ? 20 : 12) : carryTurns,
+        carryTokens: handoff.mode === 'topic' ? Math.min(carryTokens, detail ? 6000 : 4000) : carryTokens,
+      }, anchors).exchanges,
+    }
   }
 
   /**
    * 记一次完整交换,作为未来换段时可能带入的历史。
    *
    * 只在**发送成功之后**记(bridge 报的 completed 轮次带真实 parts):没发出去的那
-   * 一轮不该变成下一段带入的历史,否则新段会读到模型从未见过、主人也从未收到的
-   * 话。主动消息与后台任务同样不是「真实用户互动」,也不进这里。
+   * 一轮不进带入历史。主动消息与后台任务走各自的输出记录。
    */
   async recordSegmentExchange(report) {
     const sessionKey = report?.sessionKey
-    if (this.stopped || !sessionKey) return
-    const parts = Array.isArray(report.parts) ? report.parts : []
-    if (parts.length > 0 && !parts.some(part => part.ok)) return
-    await this.segments.recordExchange(sessionKey, { user: report.input, reply: report.reply })
+    if (this.stopped || !sessionKey || report.scope !== 'private'
+      || (report.generationStatus ?? report.status) !== 'completed' || this.client.isRetired(report.sessionId)) return
+    const turnKey = turnKeyOf(report)
+    const state = this.client.state
+    const recorded = state.generated[turnKey] ?? state.pending[turnKey] ?? state.recentTurns[turnKey]
+    if (!recorded) return
+    const { body, scope } = recorded
+    const parts = (report.parts ?? []).filter(part => part.ok)
+    const delivered = parts.filter(part => typeof part.replyText === 'string').sort((a, b) => a.index - b.index)
+    const reply = delivered.length ? delivered.map(part => part.replyText).join('\n')
+      : (parts.length && parts.length === report.parts.length
+        && parts.reduce((sum, part) => sum + part.chars, 0) === charCount(report.reply) ? report.reply : '')
+    if (!reply) return
+    const sourceKey = body?.source_key ?? buildSourceKey(this.config.pluginId, this.config.characterId,
+      scope.subject, sessionScopeId(report.sessionId), turnKey)
+    const occurred = Date.parse(body?.occurred_at)
+    await this.segments.recordExchange(sessionKey, { user: report.input, reply, sourceKey,
+      sessionId: report.sessionId, at: Number.isFinite(occurred) ? occurred : undefined,
+      requestContext: this.candidates.get(report.sessionId)?.session.requestContext?.() })
   }
 
   /**
@@ -1082,13 +1178,6 @@ class MemoryRuntime {
       this.logger.warn?.(`[dsh-rin-memory] 续聊便条未取到（不影响本轮）:${error?.message ?? error?.code}`)
       return ''
     }
-  }
-
-  /** 一个 agent 属于哪个 QQ 来源键;只从桥接绑定读,不猜。 */
-  sessionKeyOfAgent(agent) {
-    const sessionId = agent?.session?.id
-    if (!sessionId) return undefined
-    return this.bridge?.binding?.(sessionId)?.sessionKey
   }
 
   // -- DSH agent attach ------------------------------------------------
@@ -1229,7 +1318,10 @@ class MemoryRuntime {
     const binding = this.bridge?.binding?.(sessionId)
     if (binding?.scope !== 'private') return undefined
     if (binding.owner === true) return this.config.subject
-    if (this.config.friendMemoryEnabled && binding.owner === false && binding.userId !== undefined) {
+    const enabled = binding.friendMemoryEnabled ?? this.config.friendMemoryEnabled
+    const grant = this.friendMemoryGrants.get(sessionId)
+    if (enabled && (binding.friendMemoryEnabled === true ? grant === true : grant !== false)
+      && binding.owner === false && binding.userId !== undefined) {
       return `qq-friend:${binding.userId}`
     }
     return undefined
@@ -1243,14 +1335,40 @@ class MemoryRuntime {
     if (this.stopped) return
     if (!input.owner || input.scope !== 'private') {
       const agent = this.candidates.get(input.sessionId)
+      let grant
+      if (input.scope === 'private' && agent) {
+        try {
+          const publicPersona = await this.client.request('/v1/qq/persona',
+            { subject: `qq-friend:${input.userId}` }, 'GET', AbortSignal.timeout(800))
+          if (typeof publicPersona.text === 'string') this.publicQqPersona = publicPersona.text
+          if (typeof publicPersona.memory_allowed === 'boolean') grant = publicPersona.memory_allowed
+          if (typeof publicPersona.memory_enabled === 'boolean') this.memoryEnabled = publicPersona.memory_enabled
+        } catch {
+          // The bound QQ preset supplies the public voice when RIN is unavailable.
+        }
+      }
       if (agent && !this.chatScopes.has(agent)) {
         this.detach(agent)
-        const isolation = new MainSessionScope(agent, { chatOnly: true, logger: this.logger })
+        const isolation = new MainSessionScope(agent, { chatOnly: true, logger: this.logger,
+          managedCompaction: input.scope === 'group',
+          currentPersona: input.scope === 'private' ? () => this.publicQqPersona : undefined })
         if (!isolation.install()) throw new Error('QQ 纯聊天隔离未就绪，请检查 DSH 插件状态。')
         this.chatScopes.set(agent, isolation)
       }
+      if (grant !== undefined) this.friendMemoryGrants.set(input.sessionId, grant)
       input.chatOnlyReady = !!agent && this.chatScopes.has(agent)
-      if (!this.memorySubject(input.sessionId)) return
+      if (!this.memorySubject(input.sessionId)) {
+        const attached = this.attached.get(agent)
+        if (attached && input.friendMemoryEnabled !== false) {
+          throw new Error('MEMORY_REQUIRED: 好友记忆权限已变化，请重新开启私聊会话。')
+        }
+        if (attached) {
+          this.attached.delete(agent)
+          attached.dispose()
+        }
+        if (input.scope === 'private') this.chatScopes.get(agent)?.setManagedCompaction(false)
+        return
+      }
     }
     if (!input.sessionId) throw new Error('MEMORY_REQUIRED: 缺少 QQ 会话绑定')
     const sessionId = input.sessionId
@@ -1267,7 +1385,9 @@ class MemoryRuntime {
         throw new Error('记忆补交队列已满，请恢复服务后重试')
       }
       const scope = this.memoryScope(sessionId)
-      const context = await this.client.request('/v1/context', { ...scope, text: input.input })
+      const context = await this.turnContext(scope, input.input, input.sessionKey, sessionId)
+      if (typeof context.memory_enabled === 'boolean') this.memoryEnabled = context.memory_enabled
+      if (!input.owner) this.chatScopes.get(agent)?.setManagedCompaction(context.memory_enabled !== false)
       if (input.owner) requirePersona(context)
       // 系统段在 preStep 之前就装配好了,所以人格必须在这里(本轮开始前)就位,
       // 否则轮次 1 的系统提示里没有人格。这次请求本来就是本轮要用的那一份,
@@ -1286,6 +1406,7 @@ class MemoryRuntime {
   detach(agent) {
     this.chatScopes.get(agent)?.dispose()
     this.chatScopes.delete(agent)
+    this.friendMemoryGrants.delete(agent.session.id)
     this.detachSpells(agent)
     const entry = this.attached.get(agent)
     if (!entry) return
@@ -1307,7 +1428,7 @@ class MemoryRuntime {
     this.currentAgent = agent
     const prepared = await this.ensureTurn(agent, payload)
     const decision = await next()
-    if (decision.kind !== 'enter') return decision
+    if (decision.kind !== 'enter' || payload.signal?.aborted) return decision
     const turn = this.turns.get(agent)
     if (!prepared || !turn || turn.injected || turn.requestId !== prepared.requestId) return decision
     if (payload.step !== 1) return decision
@@ -1329,42 +1450,61 @@ class MemoryRuntime {
         this.logger.warn?.(`[dsh-rin-memory] 任务通知标记失败：${error.message}`)
       })
     }
-    // ---- 新段的第一次请求:干净输入(RO02-CTX)-------------------------
-    // 换段的意义就是让这一轮只读「已发布人格 + 固定咒语说明 + 带入历史 +
-    // 记忆/便条 + 当前原话与图片」。正式请求会从会话日志组装历史,所以只改
-    // pre-step 的消息数组达不成这件事 —— 真正起作用的是换了一个空会话。
-    // 这里补的是新会话里**没有**的那部分:跨段带入的旧话。
-    //
-    // 必须排除的东西:
-    // - 原生压缩摘要:新会话日志里本来就没有(压缩节点属于旧会话),不必也无法在此剥离;
-    // - 旧运行说明与后台执行过程:同样只在旧会话里,换段即离开;
-    // - 本插件自己的记忆材料:照常只给本轮增量,已注入索引在换段时作废。
-    //
-    // 带入的历史作为一条**有来源标记**的消息放在主人原话之前:它是「已经发生过的
-    // 对话」,不是主人这次说的话,来源标记让保存与召回都分得清。
-    const carryKey = this.sessionKeyOfAgent(agent)
-    const carryText = carryKey ? this.takeSegmentCarry(carryKey) : ''
-    if (carryText) {
-      const materialInput = messages.findLastIndex(message =>
-        message.source?.kind === 'user' || message.source?.kind === PROACTIVE_SOURCE)
-      const carry = {
-        id: `segment-carry:${carryKey}`,
-        role: 'user',
-        source: { kind: SEGMENT_SOURCE },
-        content: [{ type: 'text', text: `${SEGMENT_CARRY_NOTE}\n${carryText}` }],
+    if (prepared.segmentKey) {
+      const record = this.segments.current(prepared.segmentKey)
+      const surface = agent.session.deriveMessages?.() ?? []
+      const persona = this.personas.get(sessionId) || this.chatScopes.get(agent)?.lastPersona
+      const space = this.segmentSpace(agent, messages, persona, prepared.segmentLimits)
+      if (space <= estimateTokens(prepared.background) + 4) {
+        if (prepared.requiredBackground) {
+          const required = await prepared.requiredBackground()
+          prepared.background = required.text
+          prepared.fingerprints = required.fingerprints
+          prepared.references = required.references
+        }
+        if (space <= estimateTokens(prepared.background) + 4) {
+          throw new Error('本轮输入与必需上下文超出模型预算，请缩短文字或减少图片后重试。')
+        }
       }
-      messages.splice(Math.max(0, materialInput), 0, carry)
-      // 带入过的旧话已经由本轮的记忆材料与它自己承载,不必再在下一轮重贴;
-      // 但它不属于「已注入的记忆指纹」,所以不进注入索引。
+      const carry = prepared.segmentCarry
+      if (carry && record?.segment_id === carry.segmentId && !record.handoff?.adopted) {
+        const id = `segment-carry:${carry.segmentId}`
+        const available = new Set(record.handoff.exchanges.map(item => item.source_key))
+        const exchanges = selectCarry({ exchanges: carry.exchanges.filter(item => available.has(item.source_key)) }, {
+          carryTurns: this.segments.limits.carryTurns,
+          carryTokens: Math.max(0, space - estimateTokens(prepared.background) - estimateTokens(SEGMENT_CARRY_NOTE) - 32),
+        }, carry.anchors).exchanges
+        const sources = exchanges.map(item => item.source_key)
+        if (exchanges.length && !surface.some(message => message.id === id)) {
+          await this.client.serial(async () => {
+            if (this.client.isRetired(sessionId)) throw new Error('原会话已清理，等待新会话')
+            const scopeId = sessionScopeId(sessionId)
+            const refs = this.client.state.references[scopeId] ?? { ids: [], sources: [], versions: [] }
+            this.client.state.references[scopeId] = { ...refs, sources: [...new Set([...refs.sources, ...sources])] }
+            await this.client.save()
+          })
+          const materialInput = messages.findLastIndex(message => message.source?.kind === 'user')
+          messages.splice(Math.max(0, materialInput), 0, {
+            id,
+            role: 'user',
+            source: { kind: SEGMENT_SOURCE },
+            content: [{ type: 'text', text: `${SEGMENT_CARRY_NOTE}\n${renderCarry(exchanges,
+              prepared.friend ? { owner: '朋友', self: '我' } : undefined)}` }],
+          })
+        }
+        turn.segmentAdoption = { key: prepared.segmentKey, id: carry.segmentId, sources }
+      }
     }
     if (!prepared.background) {
       return messages.length > decision.messages.length ? { ...decision, messages } : decision
     }
     // 背景先于本轮输入，主人原话（包括图片）保留在最后；来源标记用于记忆隔离。
     // 索引写失败不阻断这一轮(材料已经给出去了),最坏只是下一轮重贴一次。
-    await this.markInjected(sessionId, prepared.fingerprints).catch(error => {
-      this.logger.warn?.(`[dsh-rin-memory] 注入索引保存失败：${error.message}`)
-    })
+    if (!prepared.selectionVersion) {
+      await this.markInjected(sessionId, prepared.fingerprints).catch(error => {
+        this.logger.warn?.(`[dsh-rin-memory] 注入索引保存失败：${error.message}`)
+      })
+    }
     const material = {
       id: `memory:${prepared.requestId}`,
       role: 'user',
@@ -1378,11 +1518,16 @@ class MemoryRuntime {
   }
 
   /** 压缩后开启新的上下文代际:已注入索引作废,材料可以重新送达。 */
-  async resetInjected(sessionId) {
+  async resetInjected(sessionId, keepMessageIds = false) {
     const scopeId = sessionScopeId(sessionId)
     await this.client.serial(async () => {
-      if (!this.client.state.injected[scopeId]) return
-      delete this.client.state.injected[scopeId]
+      const index = this.client.state.injected[scopeId]
+      if (!index) return
+      const tracked = keepMessageIds
+        ? Object.entries(index).filter(([, entry]) => entry?.messageId)
+        : []
+      if (tracked.length) this.client.state.injected[scopeId] = Object.fromEntries(tracked)
+      else delete this.client.state.injected[scopeId]
       await this.client.save()
     })
   }
@@ -1393,13 +1538,24 @@ class MemoryRuntime {
    * 索引按会话作用域持久化在 outbox.json 里:重启、换进程都还知道哪些材料
    * 早已给过模型,不会因为重连而把同一段记忆再贴一次。
    */
-  async markInjected(sessionId, fingerprints = []) {
-    if (fingerprints.length === 0) return
+  async markInjected(sessionId, fingerprints = [], adoption) {
+    if (fingerprints.length === 0 && !adoption) return
     const scopeId = sessionScopeId(sessionId)
     await this.client.serial(async () => {
       const index = this.client.state.injected[scopeId] ?? {}
       const at = this.client.now()
-      for (const fingerprint of fingerprints) index[fingerprint] = at
+      for (const fingerprint of fingerprints) {
+        index[fingerprint] = adoption ? { at, messageId: adoption.messageId } : at
+      }
+      if (adoption) {
+        const prior = this.client.state.references[scopeId] ?? { ids: [], sources: [], versions: [] }
+        const { ids, sources } = adoption.references
+        this.client.state.references[scopeId] = {
+          ids: [...new Set([...prior.ids, ...ids, ...sources])],
+          sources: [...new Set([...prior.sources, ...sources])],
+          versions: prior.versions,
+        }
+      }
       const keys = Object.keys(index)
       if (keys.length > INJECTION_INDEX_LIMIT) {
         for (const key of keys.slice(0, keys.length - INJECTION_INDEX_LIMIT)) delete index[key]
@@ -1437,15 +1593,15 @@ class MemoryRuntime {
     const scope = this.memoryScope(sessionId)
     input.text = binding.input
     // 空闲计时只认真实用户互动:主动消息、后台任务与咒语反馈都不走这里。
-    const segmentKey = binding.sessionKey
-    if (owner && segmentKey) {
+    const segmentKey = !owner && this.memoryEnabled === false ? undefined : binding.sessionKey
+    if (segmentKey) {
       try {
         // 先建段再记时间:顺序反了的话,首次互动会落在「还没有段」的空态上,
         // 于是这一轮既不记账也不落盘,重启后本轮互动就丢了。
         await this.bindSegment(segmentKey, sessionId)
         await this.segments.touchUser(segmentKey)
       } catch (error) {
-        // 段状态是本地簿记,坏了不该拦住主人的这一轮。
+        // 本地段状态写入失败时，本轮沿用已绑定会话。
         this.logger.warn?.(`[dsh-rin-memory] 段状态记录失败（不影响本轮）：${error.message}`)
       }
     }
@@ -1455,12 +1611,30 @@ class MemoryRuntime {
     try {
       const admission = this.admissions.get(sessionId)
       this.admissions.delete(sessionId)
-      const context = admission?.input.input === input.text && admission.scope?.subject === scope.subject ? admission.context : await this.client.request('/v1/context', {
-        ...scope,
-        text: input.text,
-      })
+      const context = admission?.input.input === input.text && admission.scope?.subject === scope.subject
+        ? admission.context : await this.turnContext(scope, input.text, segmentKey, sessionId)
       if (owner) requirePersona(context)
-      const consumed = contextReferences(context)
+      let background = await this.renderBackground(sessionId, context, agent, input.text)
+      const selectionVersion = context.context?.selection?.version === 1 ? 1 : undefined
+      const segment = segmentKey ? this.segments.current(segmentKey) : undefined
+      const segmentCarry = this.approvedSegmentCarry(segment, context)
+      let segmentLimits, requiredBackground
+      if (segment) {
+        segmentLimits = await this.resolveSegmentLimits(agent, segment, payload.modelSelection, payload.signal)
+        const persona = owner ? context.persona : this.publicQqPersona || this.chatScopes.get(agent)?.lastPersona
+        const space = this.segmentSpace(agent, payload.messages, persona, segmentLimits)
+        if (selectionVersion) {
+          requiredBackground = () => this.renderBackground(sessionId, context, agent, input.text, 0)
+          if (estimateTokens(background.text) + 4 >= space) background = await requiredBackground()
+        }
+        if (segmentCarry) {
+          segmentCarry.exchanges = selectCarry(segmentCarry, {
+            carryTurns: this.segments.limits.carryTurns,
+            carryTokens: Math.max(0, space - estimateTokens(background.text) - estimateTokens(SEGMENT_CARRY_NOTE) - 32),
+          }, segmentCarry.anchors).exchanges
+        }
+      }
+      const consumed = contextReferences(context, background.references)
       await this.client.request('/v1/context/reserve', {
         ...scope,
         request_id: requestId,
@@ -1473,7 +1647,8 @@ class MemoryRuntime {
           plugin_id: this.config.pluginId,
           session_id: sessionScopeId(sessionId),
           memory_ids: consumed.ids,
-          source_ids: consumed.sources,
+          source_ids: [...new Set([...consumed.sources, ...(segmentCarry?.exchanges.map(item => item.source_key) ?? [])])],
+          ...(selectionVersion ? { selection_version: selectionVersion } : {}),
           context_generation: String(context.persona_version ?? ''),
         },
       })
@@ -1483,9 +1658,7 @@ class MemoryRuntime {
         this.personas.set(sessionId, context.persona ?? '')
         this.awareness.set(sessionId, context.memory_awareness ?? null)
       }
-      const background = await this.renderBackground(sessionId, context, agent, input.text)
-      const segment = segmentKey ? this.segments.current(segmentKey) : undefined
-      if (owner && segment?.previous_session_id && segment.exchanges.length === 0
+      if (!selectionVersion && owner && segment?.previous_session_id && segment.exchanges.length === 0
         && context.context?.followup?.status === 'resolved') {
         const note = await this.segmentNoteFor(segmentKey, sessionId)
         if (note) background.text = [background.text, note].filter(Boolean).join('\n\n')
@@ -1503,10 +1676,18 @@ class MemoryRuntime {
       const prepared = {
         requestId,
         scope,
+        userMessageId: input.messageId,
+        segmentKey,
+        friend: !owner,
+        segmentCarry,
+        segmentLimits,
+        requiredBackground,
         contextReceiptId: context.context_receipt_id,
         personaVersion: context.persona_version ?? '',
         background: background.text,
         fingerprints: background.fingerprints,
+        selectionVersion,
+        references: consumed,
         body: {
           ...scope,
           request_id: requestId,
@@ -1519,6 +1700,7 @@ class MemoryRuntime {
           persona_version: context.persona_version ?? '',
           card_revision: Number(context.card_revision ?? 0),
           context_receipt_id: context.context_receipt_id,
+          reply_transport: 'qq',
           applies_to: 'shared',
           messages: [{ role: 'user', content: input.text }],
         },
@@ -1537,8 +1719,9 @@ class MemoryRuntime {
           return [...(meta.source_event_keys ?? []), ...(meta.source_key ? [meta.source_key] : [])]
         })
         this.client.state.references[scopeId] = {
-          ids: [...new Set([...prior.ids, ...consumed.ids, ...consumed.sources])],
-          sources: [...new Set([...prior.sources, prepared.body.source_key, ...consumed.sources, ...recentSources])],
+          ids: selectionVersion ? prior.ids : [...new Set([...prior.ids, ...consumed.ids, ...consumed.sources])],
+          sources: [...new Set([...prior.sources, prepared.body.source_key,
+            ...(selectionVersion ? [] : [...consumed.sources, ...recentSources])])],
           versions: [...new Set([...prior.versions, ...(context.persona_version ? [context.persona_version] : [])])],
         }
         this.client.state.generated[requestId] = {
@@ -1578,13 +1761,18 @@ class MemoryRuntime {
    * 里真正注入过的条目不再重贴;三类都没有新增时返回空文本,调用方据此
    * 完全不追加消息。
    */
-  async renderBackground(sessionId, context, agent, currentInput) {
+  async renderBackground(sessionId, context, agent, currentInput, memoryTokenBudget) {
     const scopeId = sessionScopeId(sessionId)
-    const seen = this.client.state.injected[scopeId] ?? {}
+    const index = this.client.state.injected[scopeId] ?? {}
     const history = agent?.session?.deriveMessages?.() ?? []
+    const present = new Set(history.filter(message => message.source?.kind === MEMORY_SOURCE).map(message => message.id))
+    const seen = context.context?.selection?.version === 1
+      ? Object.fromEntries(Object.entries(index).filter(([key, entry]) => present.has(entry?.messageId) || key.startsWith('clock:')))
+      : index
     return renderIncrement(context, seen, { scopeId,
       friend: this.bridge?.binding(sessionId)?.owner === false,
       currentInput,
+      memoryTokenBudget,
       representedText: history.filter(message => message.source?.kind !== MEMORY_SOURCE)
         .map(messageText).join('\n') })
   }
@@ -1594,6 +1782,23 @@ class MemoryRuntime {
   sessionEvent(agent, subject, event) {
     if (subject !== agent.session && subject?.id !== agent.session?.id) return
     if (this.turns.get(agent)?.proactive && !event.type.startsWith('compaction/')) return
+    const active = this.turns.get(agent)
+    const prepared = active?.prepared
+    if (event.type === 'user/message' && active?.segmentAdoption && event.data?.id === prepared.userMessageId
+      && event.data.source?.kind === 'user') {
+      const { key, id, sources } = active.segmentAdoption
+      delete active.segmentAdoption
+      void this.segments.adoptCarry(key, id, sources).catch(error =>
+        this.logger.warn?.(`[dsh-rin-memory] 跨段采用记录失败：${error.message}`))
+    }
+    if (event.type === 'user/message' && prepared?.selectionVersion && event.data?.source?.kind === MEMORY_SOURCE
+      && event.data.id === 'memory:' + prepared.requestId) {
+      prepared.body.memory_selection_adopted = true
+      void this.markInjected(agent.session.id, prepared.fingerprints, {
+        messageId: event.data.id, references: prepared.references,
+      }).catch(error => this.logger.warn?.('[dsh-rin-memory] 注入索引保存失败：' + error.message))
+      return
+    }
     if (event.type === 'assistant/message' && !event.data.interrupted) {
       if (!this.isSpellSession(agent)) return
       void this.spellRunner.handleAssistantMessage(agent, event.data.message, event.seq)
@@ -1603,7 +1808,7 @@ class MemoryRuntime {
     // 压缩会重写本会话的历史:已经注入过的背景可能已不在模型眼前,所以把它
     // 当作新的上下文代际——同一份材料允许再给一次,而不是永久沉默。
     if (event.type === 'compaction/end' || event.type === 'compaction/prune') {
-      void this.resetInjected(agent.session.id)
+      void this.resetInjected(agent.session.id, true)
         .catch(error => this.logger.warn?.(`[dsh-rin-memory] 注入索引重置失败：${error.message}`))
       return
     }
@@ -1676,9 +1881,8 @@ class MemoryRuntime {
     const connect = service => {
       if (!service?.subscribe) return () => {}
       this.bridge = service
-      const subscription = service.subscribe(report => {
-        void this.onBridgeTurn(report).catch(error => this.logger.warn?.(`QQ 轮次处理失败：${error.message}`))
-      })
+      const subscription = service.subscribe(report =>
+        this.onBridgeTurn(report).catch(error => this.logger.warn?.(`QQ 轮次处理失败：${error.message}`)))
       const admission = service.subscribeAdmission?.(input => this.prepareBridgeInput(input))
       for (const agent of this.candidates.values()) this.attach(agent)
       return () => {
@@ -1706,9 +1910,14 @@ class MemoryRuntime {
    * 因此重复上报是幂等的。
    */
   async onBridgeTurn(report) {
+    const segment = this.recordSegmentExchange(report).catch(error =>
+      this.logger.warn?.(`[dsh-rin-memory] 段历史记录失败：${error.message}`))
     const key = turnKeyOf(report ?? {})
     const previous = this.bridgeTails.get(key) ?? Promise.resolve()
-    const next = previous.catch(() => {}).then(() => this.processBridgeTurn(report))
+    const next = previous.catch(() => {}).then(async () => {
+      await segment
+      await this.processBridgeTurn(report)
+    })
     this.bridgeTails.set(key, next)
     try { await next }
     finally { if (this.bridgeTails.get(key) === next) this.bridgeTails.delete(key) }
@@ -1717,13 +1926,10 @@ class MemoryRuntime {
   async processBridgeTurn(report) {
     if (this.stopped || !report) return
     if ((report.generationStatus ?? report.status) !== 'completed') return
-    if (!report.owner && !this.memorySubject(report.sessionId)) return
     if (report.scope !== 'private') return
     if (!report.sessionId) return
     if (this.client.isRetired(report.sessionId)) return
-    if (!report.reply) return
     if (report.owner && report.parts?.some(part => part.ok)) await this.proactive.delivered(report)
-    const scope = this.memoryScope(report.sessionId)
     // The receipt must name the turn the save used. The bridge reports the DSH
     // user-message id; without it there is no honest key, so nothing is
     // recorded rather than guessing one and creating an orphan receipt.
@@ -1734,11 +1940,13 @@ class MemoryRuntime {
     const turnKey = turnKeyOf({ sessionId: report.sessionId, turnMessageId: report.turnMessageId })
     if (!turnKey) return
     const prepared = this.client.state.generated[turnKey]
-    if (!prepared && !this.client.state.pending[turnKey] && !this.client.state.recentTurns[turnKey]) return
+    const recorded = prepared ?? this.client.state.pending[turnKey] ?? this.client.state.recentTurns[turnKey]
+    if (!recorded) return
+    const { scope } = recorded
     if (prepared) {
       await this.saveTurn({ requestId: turnKey, body: { ...prepared.body,
         messages: [{ role: 'user', content: report.input }] },
-        scope: prepared.scope, personaVersion: prepared.persona_version, input: report.input }, report.reply)
+        scope: prepared.scope, personaVersion: prepared.persona_version, input: report.input }, report.reply ?? '')
     }
     try {
       // The turn may not be saved yet (the save is asynchronous and can be
@@ -1752,13 +1960,6 @@ class MemoryRuntime {
       if (!this.client.state.pending[turnKey]) await this.client.flush()
     } catch (error) {
       this.logger.warn?.(`[dsh-rin-memory] 发送回执未记录：${error.message}`)
-    }
-    // 这一段交换已经真的发到主人面前了,可以是未来换段时带入的历史。
-    // 记在发送之后而不是生成时:没发出去的话不该进入新段的带入。
-    try {
-      if (report.owner) await this.recordSegmentExchange(report)
-    } catch (error) {
-      this.logger.warn?.(`[dsh-rin-memory] 段历史记录失败：${error.message}`)
     }
   }
 
@@ -2024,12 +2225,25 @@ export function segmentPolicyFor(runtime) {
       }
     },
     /** 每轮进模型前问一次:该不该换,以及为什么。 */
-    shouldStartNewSegment(sessionKey, sessionId) {
-      return runtime.segmentSwitchReason(sessionKey, sessionId)
+    async shouldStartNewSegment(sessionKey, sessionId, input) {
+      await runtime.segments.tail
+      const record = runtime.segments.current(sessionKey)
+      if (input?.owner === false) {
+        const enabled = input.friendMemoryEnabled ?? runtime.config.friendMemoryEnabled
+        if (!enabled) {
+          const used = runtime.client.state.references[sessionScopeId(sessionId)]
+          return used ? 'memory-off' : undefined
+        }
+        if (runtime.memoryEnabled === false) return undefined
+      }
+      if (!record || !input || record.session_id !== sessionId) return runtime.segmentSwitchReason(sessionKey, sessionId, input)
+      const agent = runtime.candidates.get(sessionId)
+      const limits = await runtime.resolveSegmentLimits(agent, record, agent?.model?.current?.())
+      return runtime.segmentSwitchReason(sessionKey, sessionId, input, limits)
     },
     /** 换段已发生:开新段并记下要带进新会话的旧话。 */
-    async carryOverText(sessionKey, previousSessionId, sessionId) {
-      const reason = runtime.segmentSwitchReason(sessionKey, previousSessionId) ?? 'policy'
+    async carryOverText(sessionKey, previousSessionId, sessionId, reason) {
+      reason ??= runtime.segmentSwitchReason(sessionKey, previousSessionId) ?? 'budget'
       await runtime.onSegmentSwitched(sessionKey, { previousSessionId, sessionId, reason })
     },
   }
@@ -2152,6 +2366,7 @@ function correctionEntries(corrections) {
       .map(item => ({
         text: String(item?.text ?? item?.new_text ?? '').trim(),
         fingerprint: correctionFingerprint(item),
+        sources: item?.source_key ? [item.source_key] : [],
       }))
       .filter(entry => entry.text)
   }
@@ -2293,6 +2508,7 @@ function stateEntries(state) {
       const entry = {
         text: `${STATE_LABELS[kind]}：${text}`,
         fingerprint: `state:${key}:${id}`,
+        sources: item.source_event_ids ?? [],
       }
       if (SELF_STATE_KINDS.includes(kind)) self.push(entry)
       else threads.push(entry)
@@ -2349,7 +2565,68 @@ function episodeEntries(context) {
  * 出现在后续轮次的材料里,所以用户换话题时不会有一堆旧事被硬拉回来。真正的
  * 续接由服务端的召回与 followup 判定负责,不靠这里每轮复读。
  */
+function renderSelection(context, seen, options) {
+  const sections = []
+  const fingerprints = new Set()
+  const ids = new Set()
+  const sources = new Set()
+  const narrate = text => narrativeMemoryText(text, options.friend ? '朋友' : '主人')
+  const emit = (heading, entries, speech = false) => {
+    const lines = []
+    for (const entry of entries) {
+      if (!entry.text || seen[entry.fingerprint] || fingerprints.has(entry.fingerprint)) continue
+      fingerprints.add(entry.fingerprint)
+      if (entry.id) ids.add(entry.id)
+      for (const source of entry.sources ?? []) sources.add(source)
+      lines.push(speech ? entry.text : narrate(entry.text))
+    }
+    if (lines.length) sections.push([heading, ...lines].join('\n'))
+  }
+  const required = context.context?.corrections ?? context.corrections
+  emit('[必须遵守的更正]', correctionEntries(required))
+  emit('[禁止提及]', (context.mention_preferences ?? []).map(text => ({
+    text, fingerprint: 'restriction:' + stableHash(text),
+  })))
+
+  const selected = []
+  let remaining = options.memoryTokenBudget ?? 600
+  const memoryKeys = new Set()
+  for (const item of context.context.selection.items ?? []) {
+    if (!item?.key || typeof item.text !== 'string' || memoryKeys.has(item.key)) continue
+    const text = item.text.trim()
+    const fingerprint = memoryFingerprint({ id: item.key, text })
+    if (!text || seen[fingerprint]) continue
+    const cjk = (text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/gu) ?? []).length
+    const cost = cjk + Math.ceil((Array.from(text).length - cjk + Number(selected.length > 0)) / 4)
+    if (cost > remaining) continue
+    selected.push({ id: item.id, text, fingerprint, sources: item.source_keys ?? [] })
+    memoryKeys.add(item.key)
+    remaining -= cost
+  }
+  emit('[相关记忆]', selected)
+  emit('[当前状态]', stateEntries(context.state).self)
+  const recent = (context.recent_turns ?? []).filter(row => {
+    const owner = turnScopeId(row)
+    return !owner || !options.scopeId || owner !== options.scopeId
+  }).slice(-6)
+  emit('[近期对话]', recent.map((row, index) => {
+    const text = plain(row?.data ?? row).trim()
+    const meta = row?.data?.metadata ?? row?.metadata ?? {}
+    const speaker = row.type === 'human' ? (options.friend ? '朋友' : '主人') : '我'
+    return {
+      text: text ? speaker + '：' + text : '', fingerprint: turnFingerprint(row, index),
+      sources: [...(meta.source_event_keys ?? []), ...(meta.source_key ? [meta.source_key] : [])],
+    }
+  }), true)
+  return {
+    text: sections.length ? [MATERIAL_NOTE, sections.join('\n\n')].join('\n') : '',
+    fingerprints: [...fingerprints],
+    references: { ids: [...ids], sources: [...sources] },
+  }
+}
+
 export function renderIncrement(context, seen = {}, options = {}) {
+  if (context?.context?.selection?.version === 1) return renderSelection(context, seen, options)
   const narrate = text => narrativeMemoryText(text, options.friend ? '朋友' : '主人')
   const query = typeof options.currentInput === 'string'
     ? options.currentInput.replace(/\[图片\d+[^\]]*\]/gu, '').trim() : undefined

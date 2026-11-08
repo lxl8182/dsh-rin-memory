@@ -25,6 +25,7 @@ function harness({ state = { proactiveOutputs: {} }, sessionId = 'qq-test', outp
       async request(path, body, method = 'POST') {
         calls.push({ path, body, method })
         if (path === '/v1/context') return { ...context, basis: { ...context.basis, correction_version: valid ? 0 : 1 } }
+        if (path === '/v1/working-summary') return context.working_summary
         if (path === '/v1/outputs' && method === 'POST') {
           let row = [...outputs.values()].find(row => row.request_id === body.request_id)
           if (!row) {
@@ -127,7 +128,7 @@ test('ordinary contact waits once across restarts, respects quiet and quota, and
     agreed_followup: true, followup_at: agreed.runtime.client.now() }]
   await a.tick()
   assert.equal(agreed.followups.length, 1)
-  assert.equal(a.active.get(agreed.agent.session.id).candidates[0].agreed, true)
+  assert.deepEqual(a.active.get(agreed.agent.session.id).candidates.map(row => row.kind), ['followup'])
   a.stop()
 })
 
@@ -164,14 +165,17 @@ test('contact tags are private, time-zone anchored, idempotent and never ordinar
   assert.equal(p.state.plans['private:42'].revision, 1)
   assert.ok(p.state.status['private:42'].error)
   h.advance(12 * 3600000)
-  assert.equal(p.allowed('private:42', h.runtime.client.now(), [{ agreed: true, kind: 'task_result', due_at: h.runtime.client.now() }]), false)
-  assert.equal(p.allowed('private:42', h.runtime.client.now(), [{ agreed: true, explicit_time: true, kind: 'followup', due_at: h.runtime.client.now() }]), true)
+  assert.equal(p.allowed('private:42', h.runtime.client.now(), { agreed: true, kind: 'task_result', due_at: h.runtime.client.now() }), false)
+  assert.equal(p.allowed('private:42', h.runtime.client.now(), { agreed: true, explicit_time: true, kind: 'followup', due_at: h.runtime.client.now() }), true)
   p.stop()
 })
 
 test('cold discovery and due PASS use one model call, consume once and stay consumed after restart', async () => {
   const h = harness(), p = new ProactiveRuntime(h.runtime)
   await p.observe({ ...h.runtime.bridge.binding(h.agent.session.id), sessionId: h.agent.session.id })
+  await p.tick()
+  assert.equal(h.followups.length, 0)
+  h.advance(90 * 60000)
   await p.tick()
   assert.equal(h.followups.length, 1)
   assert.equal(p.active.get(h.agent.session.id).candidates[0].kind, 'discovery')
@@ -196,11 +200,11 @@ test('cold discovery and due PASS use one model call, consume once and stay cons
   assert.ok([...h.calls, ...restart.calls].every(call => !call.path.startsWith('/v1/proactive/')))
   restart.context.working_summary.sections.open_threads.items = [{ thread_id: 't', text: '面试', next_step: '等结果' }]
   const binding = restart.runtime.bridge.binding('qq-restored')
-  await restored.derive(binding, restart.context, 'qq-restored')
+  await restored.derive(binding, restart.context, 'qq-restored', restart.context.working_summary.sections.open_threads.items)
   const before = Object.values(restored.state.candidates).find(row => row.thread_id === 't')
   before.status = 'considered'
   restart.context.working_summary.sections.open_threads.items[0].next_step = '已经拿到录用通知'
-  await restored.derive(binding, restart.context, 'qq-restored')
+  await restored.derive(binding, restart.context, 'qq-restored', restart.context.working_summary.sections.open_threads.items)
   assert.notEqual(restored.state.candidates[before.candidate_id].content_version, before.content_version)
   assert.equal(restored.state.candidates[before.candidate_id].status, 'pending')
   restored.stop()
@@ -227,11 +231,10 @@ test('partial output resumes the same indices; new input does not cancel it and 
     if (invalidate) h.context.context = { source_ids: ['host:rin:private:cat'] }
     await p.tick()
     assert.equal(p.active.size, 1)
-    await p.observe({ ...h.runtime.bridge.binding(h.agent.session.id), sessionId: h.agent.session.id })
-    assert.equal(p.active.size, 1)
     const candidate = p.active.get(h.agent.session.id).candidates[0]
     await h.complete(p, `你好\n🐈纸箱里的猫<选题>${candidate.candidate_id}</选题><下次联系>等新进展</下次联系>`)
     assert.equal(h.sent.length, 1)
+    await p.observe({ ...h.runtime.bridge.binding(h.agent.session.id), sessionId: h.agent.session.id })
     assert.equal(h.barriers.size, 0)
     const body = h.calls.find(call => call.path === '/v1/outputs' && call.method === 'POST').body
     assert.equal(body.text, '你好\n🐈纸箱里的猫')

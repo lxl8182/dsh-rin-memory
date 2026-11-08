@@ -187,6 +187,7 @@ test('the legacy growth block is used only when the summary is absent', () => {
 /** 一个假的记忆客户端:只实现 ensureTurn 用到的那几个方法。 */
 function fakeClient(contextPayload) {
   const requests = []
+  const bodies = []
   const client = {
     state: {
       pending: {}, generated: {}, sessions: {}, references: {}, injected: {},
@@ -197,22 +198,23 @@ function fakeClient(contextPayload) {
     serial: action => Promise.resolve(action()),
     save: async () => {},
     now: () => '2026-10-27T12:00:00.000Z',
-    async request(path) {
+    async request(path, body) {
       requests.push(path)
+      bodies.push(body)
       if (path === '/v1/context') return contextPayload
       return { status: 'reserved', durable: true }
     },
   }
-  return { client, requests }
+  return { client, requests, bodies }
 }
 
 function runtimeWith(contextPayload) {
-  const { client, requests } = fakeClient(contextPayload)
+  const { client, requests, bodies } = fakeClient(contextPayload)
   const ctx = { profileContext: { home: process.cwd() }, get: () => undefined, on: () => () => {} }
   const config = normalizeConfig({ stateDirectory: process.cwd(), sessionsDirectory: process.cwd() })
   const runtime = new MemoryRuntime(ctx, config, client, { info() {}, warn() {}, error() {} })
   runtime.bridge = { binding: sessionId => ({ sessionId, owner: true, scope: 'private', input: '今天面试怎么样' }) }
-  return { runtime, requests }
+  return { runtime, requests, bodies }
 }
 
 const userMessage = (id, text) => ({
@@ -283,4 +285,45 @@ test('G20: a turn with nothing new adds no message at all', async () => {
     async () => ({ kind: 'enter', messages: [userMessage('m2', '换个话题')] }),
   )
   assert.equal(second.messages.length, 1, 'no placeholder and no re-posted material')
+})
+
+test('selection v1 reserves only rendered references and records them when admitted to history', async () => {
+  const selected = [
+    { key: 'fact:f1', id: 'f1', text: '主人喜欢红茶', source_keys: ['tea'] },
+    { key: 'fact:f2', id: 'f2', text: '主人喜欢红茶，不过上班不喝', source_keys: ['tea'] },
+    { key: 'fact:f3', id: 'f3', text: '长'.repeat(650), source_keys: ['overflow'] },
+  ]
+  const { runtime, requests, bodies } = runtimeWith(context({
+    context: { selection: { version: 1, status: 'selected', items: selected } },
+  }))
+  let visible = []
+  const agent = { session: { id: 'qq-selection', header: {}, deriveMessages: () => visible }, options: {} }
+  const step = async (turn, kind = 'enter') => {
+    const messages = [userMessage('m' + turn, '聊聊饮品')]
+    return runtime.preStep(agent, { turn, step: 1, messages }, async () => ({ kind, messages }))
+  }
+  await step(1, 'reject')
+  assert.deepEqual(runtime.client.state.injected, {})
+  const actual = await step(2)
+  const injected = actual.messages.find(message => message.source.kind === 'rin-memory')
+  const claim = bodies[requests.lastIndexOf('/v1/context/reserve')].consumer_refs
+  assert.equal(claim.selection_version, 1)
+  assert.deepEqual(claim.memory_ids, ['f1', 'f2'])
+  assert.deepEqual(claim.source_ids, ['tea'])
+  assert.match(injected.content[0].text, /喜欢红茶\n主人喜欢红茶，不过上班不喝/)
+  assert.doesNotMatch(injected.content[0].text, /模拟问答|晚上不催睡觉|长长/)
+  assert.deepEqual(runtime.client.state.injected, {})
+  const generated = Object.values(runtime.client.state.generated).at(-1)
+  assert.equal(generated.body.memory_selection_adopted, undefined)
+  visible = [injected]
+  runtime.sessionEvent(agent, agent.session, { type: 'user/message', data: injected })
+  await new Promise(resolve => setImmediate(resolve))
+  const history = Object.values(runtime.client.state.references)[0]
+  assert.equal(generated.body.memory_selection_adopted, true)
+  assert.deepEqual(history.ids, ['f1', 'f2', 'tea'])
+  assert.equal((await step(3)).messages.length, 1)
+  assert.deepEqual(bodies[requests.lastIndexOf('/v1/context/reserve')].consumer_refs.memory_ids, [])
+  assert.deepEqual(Object.values(runtime.client.state.references)[0].ids, history.ids)
+  visible = []
+  assert.ok((await step(4)).messages.some(message => message.source.kind === 'rin-memory'))
 })

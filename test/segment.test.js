@@ -8,7 +8,7 @@ import {
   renderCarry, segmentSwitchReason, selectCarry,
 } from '../session-store.js'
 import { normalizeConfig, normalizeSegment } from '../config.js'
-import { apply as applyRuntime } from '../index.js'
+import { apply as applyRuntime, segmentPolicyFor } from '../index.js'
 import { createServer } from 'node:http'
 
 
@@ -98,6 +98,7 @@ test('段龄是软上限:在两次回合之间生效,不打断进行中的回合
   // 默认参数下 idle(24h)先于 age(14d)到:超过一天的空档按空闲换段,原因记为 idle。
   const stale = record(limits.minTurns, { tokens: 1000, lastUserAt: startedAt, startedAt })
   assert.equal(segmentSwitchReason(stale, { now: old, limits }), 'idle')
+  assert.equal(segmentSwitchReason({ ...stale, tokens: limits.hardTokens }, { now: old, limits }), 'idle')
 
   // age 是 idle_hours 被调大之后仍然存在的兜底:段龄到线就换,即便主人刚刚说过话。
   // 这不是「打断回合」—— 判定只发生在两次回合之间(上一轮已结束、下一轮未开始)。
@@ -126,6 +127,8 @@ test('带入历史永不拆半轮,轮数与正文两个上限取先到', () => {
   for (const exchange of byTokens.exchanges) {
     assert.ok(exchange.user && exchange.reply, 'a half exchange must never be carried')
   }
+  const latestOversize = { user: '超'.repeat(8001), reply: '回复' }
+  assert.deepEqual(selectCarry({ exchanges: [...many.exchanges, latestOversize] }, limits), picked)
   // 空段与缺失输入都不炸。
   assert.deepEqual(selectCarry(undefined, limits), { exchanges: [], tokens: 0 })
   assert.deepEqual(selectCarry(record(0), limits), { exchanges: [], tokens: 0 })
@@ -281,18 +284,29 @@ async function fixture(t, { segment = {} } = {}) {
       response.end(JSON.stringify({ items: [] }))
       return
     }
+    if (path === '/v1/qq/persona') {
+      const subject = new URL(request.url, 'http://localhost').searchParams.get('subject')
+      response.end(JSON.stringify({ text: '我是公开版铃芽。', revision: 1,
+        memory_allowed: subject === 'qq-friend:42', memory_enabled: true }))
+      return
+    }
     if (path === '/v1/segment/note') {
       if (!state.noteRoute) { response.statusCode = 404; response.end(JSON.stringify({ code: 'not_found' })); return }
       response.end(JSON.stringify({ text: state.noteText }))
       return
     }
     if (path === '/v1/context') {
+      const segment = body.segment_history
+      const friend = body.subject?.startsWith('qq-friend:')
       response.end(JSON.stringify({
-        persona: '温柔而直白。', persona_version: 'pub-1', card_revision: 1,
+        persona: friend ? '' : '温柔而直白。', persona_version: friend ? '' : 'pub-1', card_revision: friend ? 0 : 1,
         context_receipt_id: 'ctx-' + requests.length,
         // requirePersona 要求「已发布人格或必需更正」至少其一:这里给一份更正。
-        corrections: { block: '不要用旧称呼' },
-        context: { result: 'miss', context: '', memory_ids: [] },
+        corrections: { block: friend ? '' : '不要用旧称呼' },
+        context: { result: 'miss', context: '', memory_ids: [],
+          ...(segment ? { segment_sources: segment.mode === 'topic' && body.text === '早安'
+            ? [] : segment.exchanges.map(row => row.source_key),
+            selection: { version: 1, status: 'empty', items: [] } } : {}) },
         recent_turns: [],
       }))
       return
@@ -354,7 +368,7 @@ function host({ home, bridge: external } = {}) {
       bindings.set(input.sessionId, input)
       for (const listener of admissions) await listener(input)
     },
-    publish(report) { for (const listener of listeners) listener(report) },
+    async publish(report) { for (const listener of listeners) await listener(report) },
     pushPrivate: async () => {},
     async retireSession(id) { bindings.delete(id) },
   }
@@ -401,6 +415,9 @@ function makeAgent(sessionId) {
     },
     followup() {},
     async whenIdle() {},
+    emitSession(event) {
+      for (const listener of hooks.get('session/event') ?? []) listener(this.session, event)
+    },
     preStep: (payload, next) => (hooks.get('agent/pre-step') ?? []).reduce(
       (tail, callback) => tail.then(rest => callback(rest, () => next(rest))), Promise.resolve(payload)),
   }
@@ -422,12 +439,11 @@ test('段状态落盘:重启后仍是同一段、同一会话、同样的累计'
   )
   assert.equal(decision.kind, 'enter')
   // 走一轮完整交换的记账路径。
-  first.bridge.publish({
+  await first.bridge.publish({
     sessionKey: 'private:1', sessionId: agent.session.id, scope: 'private', owner: true,
     turnMessageId: 'm-1', input: '你好', reply: '在。', status: 'completed',
-    generationStatus: 'completed', parts: [{ index: 0, ok: true }],
+    generationStatus: 'completed', parts: [{ index: 0, ok: true, chars: 2, replyText: '在。' }],
   })
-  await new Promise(resolve => setTimeout(resolve, 120))
   await dispose()
   const raw = await readFile(join(root, 'segments.json'), 'utf8')
   const saved = JSON.parse(raw)
@@ -436,6 +452,7 @@ test('段状态落盘:重启后仍是同一段、同一会话、同样的累计'
   assert.equal(record.session_id, agent.session.id)
   assert.equal(record.exchanges.length, 1)
   assert.equal(record.exchanges[0].user, '你好')
+  assert.match(record.exchanges[0].source_key, /^plugin:dsh_memory:companion:private:/)
   assert.ok(record.tokens > 0)
 
   // 重启:同一份文件必须被重新读成同一个段。
@@ -462,13 +479,17 @@ test('满预算换段:按生产接线调用判定与通知,新段只带最近完
   const lines = ['第一句' + '啊'.repeat(700), '第二句' + '啊'.repeat(700), '第三句' + '啊'.repeat(700)]
   for (const [index, line] of lines.entries()) {
     await h.bridge.prepare({ sessionId: agent.session.id, sessionKey: KEY, scope: 'private', owner: true, userId: 2, input: line })
-    await runtime.segments.recordExchange(KEY, { user: line, reply: '回' + index })
+    await runtime.segments.recordExchange(KEY, { user: line, reply: '回' + index, sourceKey: 'src-' + index })
   }
   assert.equal(runtime.segments.current(KEY).exchanges.length, 3)
 
   // 判定:累计已越过软上限且轮数足够。
   const reason = runtime.segmentSwitchReason(KEY, agent.session.id)
   assert.equal(reason, 'budget')
+  runtime.candidates.set(agent.session.id, agent)
+  agent.session.snapshotEvents = () => [{ type: 'assistant/message',
+    data: { usage: { inputTokens: 10000, cacheReadTokens: 144000, outputTokens: 1000 } } }]
+  assert.equal(runtime.segmentSwitchReason(KEY, agent.session.id, { text: '接着来', imageCount: 1 }), 'hard')
 
   // 生产接线的通知:带上旧会话与新会话。
   await runtime.onSegmentSwitched(KEY, { previousSessionId: agent.session.id, sessionId: 'qq-new-1', reason })
@@ -478,7 +499,14 @@ test('满预算换段:按生产接线调用判定与通知,新段只带最近完
   assert.equal(after.previous_session_id, agent.session.id)
 
   // 只带最近两轮,而且按时间顺序。
-  const carry = runtime.takeSegmentCarry(KEY)
+  const restarted = await loadRuntime(h, config)
+  assert.equal(restarted.segmentSwitchReason(KEY, agent.session.id), 'budget')
+  await restarted.onSegmentSwitched(KEY, { previousSessionId: agent.session.id, sessionId: 'qq-new-after-restart', reason })
+  const restored = restarted.segments.current(KEY)
+  assert.equal(restored.session_id, 'qq-new-after-restart')
+  assert.equal(restored.previous_session_id, agent.session.id)
+  const context = { context: { segment_sources: ['src-1', 'src-2'] } }
+  const carry = renderCarry(restarted.approvedSegmentCarry(restored, context).exchanges)
   assert.ok(carry.includes('第三句'), 'most recent exchange must be carried')
   assert.ok(carry.includes('第二句'), 'carryTurns = 2 means the last two exchanges')
   assert.ok(!carry.includes('第一句'), 'nothing older than the window is carried')
@@ -486,8 +514,8 @@ test('满预算换段:按生产接线调用判定与通知,新段只带最近完
   assert.equal(carry.split('主人: ').length - 1, 2)
   assert.equal(carry.split('铃芽: ').length - 1, 2)
   assert.ok(carry.split('\n').length <= 4, 'at most carryTurns exchanges (2 lines each)')
-  // 取走即清空:同一份旧话不会重复出现在下一轮。
-  assert.equal(runtime.takeSegmentCarry(KEY), '')
+  await restarted.segments.adoptCarry(KEY, restored.segment_id, ['src-1', 'src-2'])
+  assert.equal(restarted.approvedSegmentCarry(restored, context), undefined)
   await dispose()
 })
 
@@ -506,7 +534,35 @@ test('同一个段不会被重复判定为要换:换过之后重新计时', asyn
   await dispose()
 })
 
-test('宿主换了会话而段状态还记着旧的:只把段绑过去,不算一次换段', async t => {
+test('跨日续聊回放按 12 / 20 轮上限选同话题原话，并优先保留命中的早期原话', async t => {
+  const { root, config, requests } = await fixture(t)
+  const runtime = await loadRuntime(host({ home: root }), config)
+  const exchanges = Array.from({ length: 25 }, (_, i) => ({
+    at: i, source_key: 'topic-' + i, user: '海边露营清单第' + i + '项', reply: '收到这一项',
+  }))
+  const record = await runtime.segments.begin('private:8', { sessionId: 'qq-next-day', reason: 'idle',
+    handoff: { mode: 'topic', exchanges } })
+  const context = { context: { segment_sources: exchanges.map(item => item.source_key), segment_anchors: ['topic-0'] } }
+  const normal = runtime.approvedSegmentCarry(record, context).exchanges
+  assert.equal(normal.length, 12)
+  assert.equal(normal[0].source_key, 'topic-0')
+  context.context.segment_detail = true
+  assert.equal(runtime.approvedSegmentCarry(record, context).exchanges.length, 20)
+  context.context.segment_sources = []
+  assert.deepEqual(runtime.approvedSegmentCarry(record, context).exchanges, [])
+  const scope = runtime.client.scope('qq-next-day')
+  const greeting = await runtime.turnContext(scope, '早安', 'private:8', 'qq-next-day')
+  assert.deepEqual(runtime.approvedSegmentCarry(record, greeting).exchanges, [])
+  await runtime.segments.adoptCarry('private:8', record.segment_id, [])
+  assert.ok(record.handoff.deferred)
+  await runtime.turnContext(scope, '今天想吃面', 'private:8', 'qq-next-day')
+  assert.equal(requests.at(-1).body.segment_history, undefined)
+  const resumed = await runtime.turnContext(scope, '继续聊昨晚的露营清单', 'private:8', 'qq-next-day')
+  assert.equal(runtime.approvedSegmentCarry(record, resumed).exchanges.length, 12)
+  await runtime.stop()
+})
+
+test('手工切会话从新段开始，旧段预算和带入材料随原会话保留', async t => {
   const { root, config } = await fixture(t, { segment: { budgetTokens: 1000, minTurns: 1 } })
   const h = host({ home: root })
   const dispose = await applyRuntime(h.ctx, config)
@@ -516,8 +572,10 @@ test('宿主换了会话而段状态还记着旧的:只把段绑过去,不算一
   await runtime.segments.recordExchange(KEY, { user: '一'.repeat(700), reply: '二'.repeat(700) })
   // 宿主自己换了会话(重启/手工 /new-session):不该因此再换一次段并丢掉带入。
   assert.equal(runtime.segmentSwitchReason(KEY, 'qq-other'), undefined)
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await runtime.bindSegment(KEY, 'qq-other')
   assert.equal(runtime.segments.current(KEY).session_id, 'qq-other')
+  assert.equal(runtime.segments.current(KEY).tokens, 0)
+  assert.equal(runtime.segments.current(KEY).handoff, undefined)
   await dispose()
 })
 
@@ -553,17 +611,19 @@ test('新段第一次请求只带允许的东西:没有原生压缩摘要、没�
     { turn: 1, step: 1, messages: [{ id: 'u0', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '上次那个服务器还没修好' + '啊'.repeat(700) }] }] },
     payload => ({ kind: 'enter', messages: payload.messages }),
   )
-  h.bridge.publish({
+  await h.bridge.publish({
     sessionKey: KEY, sessionId: SESSION, scope: 'private', owner: true, turnMessageId: 'u0',
-    input: '上次那个服务器还没修好' + '啊'.repeat(700), reply: '记着呢。' + '嗯'.repeat(700),
-    status: 'completed', generationStatus: 'completed', parts: [{ index: 0, ok: true }],
+    input: '上次那个服务器还没修好' + '啊'.repeat(700), reply: '记着呢。' + '嗯'.repeat(700) + '未送达部分',
+    status: 'failed', generationStatus: 'completed', parts: [
+      { index: 0, ok: true, chars: 704, replyText: '记着呢。' + '嗯'.repeat(700) },
+      { index: 1, ok: false, chars: 5 },
+    ],
   })
-  await new Promise(resolve => setTimeout(resolve, 60))
 
   // 判定与通知都走端口,与桥接层即将补上的两处调用完全一致。
   const reason = await policy.shouldStartNewSegment(KEY, SESSION)
   assert.equal(reason, 'budget')
-  await policy.carryOverText(KEY, SESSION, 'qq-clean-1')
+  await policy.carryOverText(KEY, SESSION, 'qq-clean-1', reason)
 
   // 新段第一轮。
   const agent = makeAgent('qq-clean-1')
@@ -586,10 +646,73 @@ test('新段第一次请求只带允许的东西:没有原生压缩摘要、没�
   assert.equal(decision.tools, undefined, 'carry must not introduce a tools field')
   // 历史携带材料保留原说话者和先前时间。
   const carry = decision.messages.find(message => message.source?.kind === 'segment-carry')
-  assert.match(carry.content[0].text, /先前相邻几轮/)
-  assert.match(carry.content[0].text, /原说话者身份和先前的时间/)
+  assert.match(carry.content[0].text, /当时的说话者和顺序/)
   assert.match(carry.content[0].text, /服务器/)
+  assert.doesNotMatch(carry.content[0].text, /未送达部分/)
+  const staged = JSON.parse(await readFile(join(root, 'segments.json'), 'utf8')).segments[KEY]
+  assert.ok(!staged.handoff.adopted)
+  for (const message of decision.messages) agent.emitSession({ type: 'user/message', data: message })
+  agent.emitSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  await h.bridge.prepare({ sessionId: 'qq-clean-1', sessionKey: KEY, scope: 'private', owner: true, userId: 6, input: '那下次呢' })
+  const next = await agent.preStep(
+    { turn: 2, step: 1, messages: [{ id: 'u2', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '那下次呢' }] }] },
+    payload => ({ kind: 'enter', messages: payload.messages }),
+  )
+  assert.ok(!next.messages.some(message => message.source?.kind === 'segment-carry'))
+  const reopened = await loadRuntime(h, config)
+  const source = staged.handoff.exchanges[0].source_key
+  assert.deepEqual(new Set(reopened.sessionsForDeletion({ source_keys: [source] })), new Set([SESSION, 'qq-clean-1']))
+  await reopened.handleCleanup([{ deletion_id: 'delete-test', source_keys: [source] }])
+  assert.equal(reopened.segments.current(KEY), undefined)
   await dispose()
+})
+
+test('获授权好友复用私聊换段与送达来源，按好友身份带入和清理', async t => {
+  const { root, config, requests } = await fixture(t, { segment: { budgetTokens: 1000, minTurns: 1 } })
+  config.friendMemoryEnabled = false
+  const h = host({ home: root })
+  const dispose = await applyRuntime(h.ctx, config)
+  t.after(dispose)
+  const key = 'private:42'
+  const owner = false
+  async function input(sessionId, id, text) {
+    const agent = makeAgent(sessionId)
+    agent.ctx.tools.guard = () => () => {}
+    h.ctx.emit('agent/created', { agent })
+    await h.bridge.prepare({ sessionId, sessionKey: key, userId: 42, scope: 'private', owner, input: text,
+      friendMemoryEnabled: true })
+    return agent.preStep({ turn: 1, step: 1, messages: [
+      { id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] },
+    ] }, payload => ({ kind: 'enter', messages: payload.messages }))
+  }
+  const oldSession = 'qq-friend-old'
+  const oldText = '露营清单'.repeat(270)
+  await input(oldSession, 'friend-old', oldText)
+  await h.bridge.publish({ sessionId: oldSession, sessionKey: key, owner, scope: 'private',
+    status: 'completed', turnMessageId: 'friend-old', input: oldText, reply: '带一盏灯。',
+    parts: [{ index: 0, chars: 5, ok: true, replyText: '带一盏灯。' }] })
+
+  const policy = h.services.get('companionSegmentPolicy')
+  const reason = await policy.shouldStartNewSegment(key, oldSession,
+    { owner, text: '接着聊', imageCount: 0, friendMemoryEnabled: true })
+  assert.equal(reason, 'budget')
+  await policy.carryOverText(key, oldSession, 'qq-friend-new', reason)
+  const decision = await input('qq-friend-new', 'friend-new', '接着聊')
+  const carry = decision.messages.find(message => message.source?.kind === 'segment-carry').content[0].text
+  assert.match(carry, /朋友: 露营清单/)
+  assert.match(carry, /我: 带一盏灯/)
+  assert.doesNotMatch(carry, /主人/)
+  const context = requests.findLast(row => row.path === '/v1/context')
+  const [exchange] = context.body.segment_history.exchanges
+  assert.equal(context.body.subject, 'qq-friend:42')
+  assert.match(exchange.source_key, /^plugin:dsh_memory:companion:qq-friend_42:/)
+  const reopened = await loadRuntime(h, config)
+  assert.deepEqual(new Set(reopened.sessionsForDeletion({ source_keys: [exchange.source_key] })),
+    new Set([oldSession, 'qq-friend-new']))
+  const disabled = { owner, text: '接着聊', imageCount: 0, friendMemoryEnabled: false }
+  assert.equal(await policy.shouldStartNewSegment(key, 'qq-friend-new', disabled), 'memory-off')
+  await policy.carryOverText(key, 'qq-friend-new', 'qq-friend-off', 'memory-off')
+  assert.equal(await policy.shouldStartNewSegment(key, 'qq-friend-off', disabled), undefined)
 })
 
 test('空闲只认真实用户互动:主动消息与后台任务不重置计时', async t => {

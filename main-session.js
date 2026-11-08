@@ -158,14 +158,16 @@ export class MainSessionScope {
    * @param {object} options
    * @param {(agent: object) => string | Promise<string>} options.currentPersona 读取该 agent 当前应采用的完整人格正文
    * @param {object} [options.logger]
-   * @param {boolean} [options.chatOnly] 好友/群仅使用 QQ 预设，不读取人格记忆或展示咒语。
+   * @param {boolean} [options.chatOnly] 使用公开聊天人设和工具隔离。
    */
-  constructor(agent, { currentPersona, currentAwareness = () => '', learned = () => [], chatOnly = false, logger = console } = {}) {
+  constructor(agent, { currentPersona, currentAwareness = () => '', learned = () => [], chatOnly = false,
+    managedCompaction = !chatOnly, logger = console } = {}) {
     this.agent = agent
     this.currentPersona = currentPersona ?? (() => '')
     this.currentAwareness = currentAwareness
     this.learned = learned
     this.chatOnly = chatOnly
+    this.managedCompaction = managedCompaction
     this.logger = logger
     this.disposers = []
     this.installed = false
@@ -231,15 +233,27 @@ export class MainSessionScope {
       this.logger.warn?.(`[dsh-rin-memory] 主会话执行闸安装失败:${error?.message ?? error}`)
     }
     this.installed = true
+    this.setManagedCompaction(this.managedCompaction)
+    this.disposers.push(() => this.setManagedCompaction(false))
+    return true
+  }
+
+  setManagedCompaction(enabled) {
+    if (!enabled) {
+      this.compactionDispose?.()
+      this.compactionDispose = undefined
+      return
+    }
+    if (this.compactionDispose) return
+    const agentCtx = this.agent.ctx
     if (typeof agentCtx.inject === 'function') {
       const fiber = agentCtx.inject(['compaction'], scope => {
         scope.effect(() => suppressCompaction(scope.get('compaction'), this.agent.session.id))
       })
-      this.disposers.push(() => fiber?.dispose())
+      this.compactionDispose = () => fiber?.dispose()
     } else if (typeof agentCtx.get === 'function') {
-      this.disposers.push(suppressCompaction(agentCtx.get('compaction'), this.agent.session.id))
+      this.compactionDispose = suppressCompaction(agentCtx.get('compaction'), this.agent.session.id)
     }
-    return true
   }
 
   /**
@@ -257,9 +271,10 @@ export class MainSessionScope {
     this.assemblies += 1
     let persona = ''
     try {
-      persona = this.chatOnly
-        ? String(upstream.sections.find(section => section.name === PERSONA_SECTION)?.text ?? '')
-        : String(await this.currentPersona(this.agent) ?? '')
+      persona = String(await this.currentPersona(this.agent) ?? '')
+      if (this.chatOnly && !persona) {
+        persona = String(upstream.sections.find(section => section.name === PERSONA_SECTION)?.text ?? '')
+      }
     } catch (error) {
       this.logger.warn?.(`[dsh-rin-memory] 读取当前人格失败:${error?.message ?? error}`)
       // Keep the last persona this session actually used rather than dropping
@@ -270,7 +285,7 @@ export class MainSessionScope {
     }
     if (persona) {
       this.lastPersona = persona
-    } else {
+    } else if (!this.chatOnly) {
       persona = this.lastPersona
     }
     // 系统提示:人格 + 魔法段。宿主的身份句、宿主与第三方插件的全部说明段都不进

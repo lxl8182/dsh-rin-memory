@@ -88,6 +88,11 @@ export function normalizeContact(raw = {}) {
 }
 
 /** One persisted opportunity; new polls may postpone it but never reroll it. */
+export function lastContactAt(activity = {}) {
+  return Math.max(0, ...[activity.last_proactive, activity.last_inbound, activity.last_outbound]
+    .map(value => Date.parse(value) || 0))
+}
+
 export function ordinaryContactTime(now, config, activity = {}, previous, random = Math.random) {
   const clock = localClock(now, config.timezone)
   const quiet = value => {
@@ -105,8 +110,7 @@ export function ordinaryContactTime(now, config, activity = {}, previous, random
   const delay = previous?.delay_ms ?? Math.round((config.ordinaryDelayMinMinutes
     + random() * (config.ordinaryDelayMaxMinutes - config.ordinaryDelayMinMinutes)) * 60000)
   const created = previous?.created_at ?? now
-  let base = Math.max(Date.parse(created), activity.last_proactive
-    ? Date.parse(activity.last_proactive) + config.minGapMinutes * 60000 : 0)
+  let base = Math.max(Date.parse(created), lastContactAt(activity) + config.minGapMinutes * 60000)
   if (activity.day === clock.date && (activity.count ?? 0) >= config.dailyLimit) base = Math.max(base, opening(now, true))
   if (quiet(now)) base = Math.max(base, opening(now))
   if (quiet(base)) base = opening(base)
