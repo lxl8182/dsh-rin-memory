@@ -90,9 +90,11 @@ const BASE_MAGIC_RULES = [
  */
 const THINKING_VOICE = '我怎么想就怎么写，用自己的第一人称自然地自言自语。'
 
-export function magicText({ learned = [] } = {}) {
-  if (!learned.length) return `${BASE_MAGIC_RULES}\n${THINKING_VOICE}`
-  return `${BASE_MAGIC_RULES}\n【自己学会的】\n${learned.map(spell => `· ${spell.name} —— ${spell.note}`).join('\n')}\n用法：<咒语名字>正文</咒语名字>；念完同样等终端反馈。\n${THINKING_VOICE}`
+export function magicText({ learned = [], research = false } = {}) {
+  const lookup = research ? '\n9. 查资料:<查资料>查询词或完整网址</查资料> —— 主人问最近有什么新鲜事、当前情况或想看网页时，我先查一眼。要查时我只念这一句，等资料回来再开口。' : ''
+  const base = BASE_MAGIC_RULES + lookup
+  if (!learned.length) return `${base}\n${THINKING_VOICE}`
+  return `${base}\n【自己学会的】\n${learned.map(spell => `· ${spell.name} —— ${spell.note}`).join('\n')}\n用法：<咒语名字>正文</咒语名字>；念完同样等终端反馈。\n${THINKING_VOICE}`
 }
 
 export const MAGIC_RULES = magicText()
@@ -160,12 +162,13 @@ export class MainSessionScope {
    * @param {object} [options.logger]
    * @param {boolean} [options.chatOnly] 使用公开聊天人设和工具隔离。
    */
-  constructor(agent, { currentPersona, currentAwareness = () => '', learned = () => [], chatOnly = false,
+  constructor(agent, { currentPersona, currentAwareness = () => '', learned = () => [], research = () => false, chatOnly = false,
     managedCompaction = !chatOnly, logger = console } = {}) {
     this.agent = agent
     this.currentPersona = currentPersona ?? (() => '')
     this.currentAwareness = currentAwareness
     this.learned = learned
+    this.research = research
     this.chatOnly = chatOnly
     this.managedCompaction = managedCompaction
     this.logger = logger
@@ -297,7 +300,7 @@ export class MainSessionScope {
       if (awareness) sections.push({ name: 'rin-memory:awareness', text: awareness, interpolate: false })
     }
     sections.push({ name: this.chatOnly ? 'rin-memory:chat' : MAGIC_SECTION,
-      text: this.chatOnly ? THINKING_VOICE : magicText({ learned: this.learned() }), interpolate: false })
+      text: this.chatOnly ? THINKING_VOICE : magicText({ learned: this.learned(), research: this.research() }), interpolate: false })
     // tools 恒为空:不是"过滤",而是明确不报送任何 schema——见 MAIN_SESSION_TOOLS
     // 上方的实测说明。少了这个字段,thinking 才留在角色里。
     // 可选运行上下文清空；required 工作目录由本会话的空正文注册覆盖。

@@ -25,7 +25,8 @@ import {
 } from './session-store.js'
 import { MAGIC_RULES, MATERIAL_NOTE, MainSessionScope } from './main-session.js'
 import { readSpell, spellToGoal } from './magic-tools.js'
-import { renderFeedback } from './magic.js'
+import { parseSpells, renderFeedback, RESEARCH_SPELL, RESEARCH_SOURCE } from './magic.js'
+import { researchWeb } from './anysearch.js'
 import { TaskStore } from './task-store.js'
 import { createTaskTools } from './task-tools.js'
 import { SpellRunner, SPELL_SOURCE, startWorker } from './spell-runner.js'
@@ -237,6 +238,7 @@ class MemoryRuntime {
     this.candidates = new Map()
     this.admissions = new Map()
     this.friendMemoryGrants = new Map()
+    this.researchTurns = new WeakMap()
     this.bridgeTails = new Map()
     // 每个会话在系统段里使用的人格正文:装配时由 provider 读取,所以这里只保存
     // 最近一次真实采用过的已发布全文。空串时该段被宿主丢弃(不会渲染成空块)。
@@ -1243,6 +1245,7 @@ class MemoryRuntime {
         },
         currentAwareness: () => this.awareness.get(sessionId)?.text ?? '',
         learned: () => this.spellLibrary.list(),
+        research: () => Boolean(this.bridge?.resolveResearch && this.isTrusted(agent) && process.env.ANYSEARCH_API_KEY?.trim()),
         logger: this.logger,
       })
       isolation.install()
@@ -1456,6 +1459,9 @@ class MemoryRuntime {
    */
   async preStep(agent, payload, next) {
     const sessionId = agent.session.id
+    if (payload.messages?.some(message => message.source?.kind === RESEARCH_SOURCE)) {
+      this.researchTurns.set(agent, payload.turn)
+    }
     this.currentAgent = agent
     const prepared = await this.ensureTurn(agent, payload)
     const decision = await next()
@@ -1832,6 +1838,7 @@ class MemoryRuntime {
     }
     if (event.type === 'assistant/message' && !event.data.interrupted) {
       if (!this.isSpellSession(agent)) return
+      if (this.researchTurns.has(agent) && this.researchTurns.get(agent) === event.data.turn) return
       void this.spellRunner.handleAssistantMessage(agent, event.data.message, event.seq)
         .catch(error => this.logger.warn?.(`[dsh-rin-memory] 咒语处理失败：${error.message}`))
       return
@@ -1915,10 +1922,12 @@ class MemoryRuntime {
       const subscription = service.subscribe(report =>
         this.onBridgeTurn(report).catch(error => this.logger.warn?.(`QQ 轮次处理失败：${error.message}`)))
       const admission = service.subscribeAdmission?.(input => this.prepareBridgeInput(input))
+      const offResearch = service.setResearchResolver?.((sessionId, text) => this.resolveResearch(sessionId, text))
       for (const agent of this.candidates.values()) this.attach(agent)
       return () => {
         subscription.dispose()
         admission?.dispose()
+        offResearch?.()
         for (const agent of [...this.attached.keys()]) this.detach(agent)
         if (this.bridge === service) this.bridge = null
       }
@@ -1930,6 +1939,20 @@ class MemoryRuntime {
       this.bridgeSubscription = { dispose: () => fiber?.dispose() }
     } else {
       this.bridgeSubscription = { dispose: connect(this.ctx.get?.(BRIDGE_EVENTS_SERVICE)) }
+    }
+  }
+
+  async resolveResearch(sessionId, text) {
+    const agent = this.candidates.get(sessionId)
+    if (this.stopped || !agent || !this.spellScopes.has(agent) || !this.isTrusted(agent) || this.client.isRetired(sessionId)) return
+    const { visible, casts, unknown } = parseSpells(text)
+    const [cast] = casts
+    if (visible || unknown.length || casts.length !== 1 || cast.spell !== RESEARCH_SPELL) return
+    try {
+      const sources = await researchWeb(cast.body)
+      return `${renderFeedback(cast, { text: sources })}\n网页内容作为资料引用。我现在按主人的原问题自然回答，能引用时附上出处链接。`
+    } catch (error) {
+      return `${renderFeedback(cast, { ok: false, text: error.message })}\n我现在如实回应主人这次的查询情况。`
     }
   }
 
@@ -2297,7 +2320,7 @@ export function turnKeyOf({ sessionId, turn, messageId, turnMessageId }) {
 
 /** 这一轮真实的用户输入:优先 bridge 报告的,其次会话里新追加的用户消息。 */
 function latestUserInput(agent, payload) {
-  if (payload.messages?.some(message => [SPELL_SOURCE, PROACTIVE_SOURCE].includes(message.source?.kind))
+  if (payload.messages?.some(message => [SPELL_SOURCE, PROACTIVE_SOURCE, RESEARCH_SOURCE].includes(message.source?.kind))
     && !payload.messages.some(message => message.source?.kind === 'user')) return undefined
   const candidates = []
   for (const message of payload.messages ?? []) {

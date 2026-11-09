@@ -25,7 +25,9 @@
  */
 import { contactControls } from './contact.js'
 
-export const SPELLS = Object.freeze(['读取', '执行', '翻本子', '改写', '撕掉', '学到'])
+export const RESEARCH_SPELL = '查资料'
+export const RESEARCH_SOURCE = 'companion-research'
+export const SPELLS = Object.freeze(['读取', '执行', '翻本子', '改写', '撕掉', '学到', RESEARCH_SPELL])
 
 /**
  * 从一段回复里拆出可见正文与咒语。

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { messageText } from './memory-client.js'
-import { parseSpells, renderFeedback } from './magic.js'
+import { parseSpells, renderFeedback, RESEARCH_SPELL } from './magic.js'
 
 export const SPELL_SOURCE = 'companion-spell'
 
@@ -128,7 +128,7 @@ export class SpellRunner {
 
   handleAssistantMessage(agent, message, seq) {
     const parsed = parseSpells(messageText(message), this.learnedNames())
-    const casts = parsed.casts
+    const casts = parsed.casts.filter(cast => cast.spell !== RESEARCH_SPELL)
     // 念了还没学会的名字:不执行,但必须回话。静默等于告诉模型"成功了"。
     const unknown = parsed.unknown.map(cast => ({
       cast, ok: false,

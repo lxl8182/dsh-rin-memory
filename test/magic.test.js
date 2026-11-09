@@ -2,6 +2,30 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseSpells, renderFeedback, runSpells } from '../magic.js'
 import { readSpell, spellToGoal } from '../magic-tools.js'
+import { researchWeb } from '../anysearch.js'
+
+test('查资料 recognizes the spell and uses the appropriate AnySearch HTTP request', async () => {
+  const [{ body }] = parseSpells('<查资料>最近的独立游戏试玩</查资料>').casts
+  const requests = []
+  const fetcher = async (url, init) => {
+    requests.push([url, JSON.parse(init.body)])
+    assert.equal(init.headers.Authorization, 'Bearer mock-key')
+    const row = { url: 'https://example.com/demo', title: '试玩介绍', content: '一段正文' }
+    return Response.json({ code: 0, data: url.endsWith('/extract') ? row : { results: [row] } })
+  }
+  const options = { key: 'mock-key', fetcher }
+  assert.match(await researchWeb(body, options), /试玩介绍\nhttps:\/\/example\.com\/demo/)
+  assert.match(await researchWeb('https://example.com/demo', options), /一段正文/)
+  assert.deepEqual(requests, [
+    ['https://api.anysearch.com/v1/search', { query: body, max_results: 4 }],
+    ['https://api.anysearch.com/v1/extract', { url: 'https://example.com/demo' }],
+  ])
+})
+
+test('AnySearch error bodies stay out of spell feedback', async () => {
+  await assert.rejects(researchWeb('query', { key: 'mock-key', fetcher: async () =>
+    new Response('private upstream details', { status: 402 }) }), { message: 'AnySearch 额度不足（HTTP 402）。' })
+})
 
 test('spells are lifted out of the visible text, never shown to the owner', () => {
   const parsed = parseSpells('小铃去看看。\n\n<执行>df -h</执行>')
