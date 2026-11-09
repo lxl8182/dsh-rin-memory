@@ -1,12 +1,13 @@
 /** Private contact metadata. It is never a spell, spoken text or user evidence. */
-export function contactControls(value) {
+export function contactControls(value, { trim = true } = {}) {
   let contact, choice, malformed = false
   const text = String(value ?? '').replace(/<(下次联系|选题)>([\s\S]*?)<\/\1>/gu, (_all, tag, body) => {
     if (tag === '下次联系') contact = body.trim()
     else choice = body.trim()
     return ''
-  }).replace(/<(?:下次联系|选题)>[\s\S]*$/u, () => { malformed = true; return '' }).trim()
-  return { text: text === '[PASS]' ? '' : text, contact, choice, malformed }
+  }).replace(/<(?:下次联系|选题)>[\s\S]*$/u, () => { malformed = true; return '' })
+  const trimmed = text.trim()
+  return { text: trimmed === '[PASS]' ? '' : trim ? trimmed : text, contact, choice, malformed }
 }
 
 export function localClock(now, timezone) {

@@ -1010,6 +1010,23 @@ test('only the trusted bridge final text is committed, even when platform sendin
   assert.equal(saved.reply_transport, 'qq')
 })
 
+test('a failed QQ continuation clears the original generated reservation', async t => {
+  const f = await fixture(t)
+  const h = await start(t, f)
+  const agent = makeAgent('qq-owner')
+  agent.autoReport = false
+  h.ctx.emit('agent/created', { agent })
+  await agent.preStep({ turn: 1, step: 1, messages: [userMessage('m-research', '查一下试玩')] })
+  agent.turnEnd(1, [assistantEvent(1, '<查资料>试玩</查资料>')])
+  const generated = async () => Object.keys(JSON.parse(await readFile(join(f.root, 'outbox.json'), 'utf8')).generated)
+  assert.equal((await generated()).length, 1)
+  await h.bridge.publish({ status: 'failed', owner: true, scope: 'private',
+    sessionId: 'qq-owner', turnMessageId: 'm-research', input: '查一下试玩', reply: '回复未完成', parts: [] })
+  for (let n = 0; n < 100 && (await generated()).length; n++) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(await generated(), [])
+  assert.equal(f.requests.filter(row => row.path === '/v1/turns').length, 0)
+})
+
 test('missing required context blocks the native model boundary instead of falling through', async t => {
   const f = await fixture(t, { contextStale: true })
   const h = await start(t, f)

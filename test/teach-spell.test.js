@@ -269,7 +269,7 @@ test('MEMORY_RULES describes lasting teaching and current-turn requests in first
 test('the magic section tells the model 学到 exists, in the same shape as its neighbours', async () => {
   const { magicText } = await import('../main-session.js')
   const text = magicText()
-  assert.match(text, /自己的第一人称/)
+  assert.match(text, /我用第一人称想事情/)
   assert.doesNotMatch(text, /不要|不再|不把|不能|禁止|不得|不是|不准|不用/)
   assert.match(text, /<学到>/, 'the model must know the spell exists, or it is unreachable')
   // 格式与 3/4/5 完全一致:序号. 名字:<名字>参数</名字> —— 一句话说明。
@@ -280,7 +280,7 @@ test('the magic section tells the model 学到 exists, in the same shape as its 
     assert.ok(!line.includes(banned), 'the 学到 line must not explain ' + banned)
   }
   // 元咒语说明原样保留(「学成学败程序会回话」是实测救回来的)。
-  assert.match(text, /学成学败程序会回话/)
+  assert.match(text, /我等消息回来再说学得怎么样/)
   assert.match(text, /7\. 学咒语:/)
   assert.match(text, /8\. 忘掉咒语:/)
   // 序号仍是 1..N 连续,顺序即协议顺序。

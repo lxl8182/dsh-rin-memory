@@ -1243,7 +1243,7 @@ class MemoryRuntime {
           this.awareness.set(sessionId, context.memory_awareness ?? null)
           return context.persona
         },
-        currentAwareness: () => this.awareness.get(sessionId)?.text ?? '',
+        currentAwareness: () => this.awareness.get(sessionId),
         learned: () => this.spellLibrary.list(),
         research: () => Boolean(this.bridge?.resolveResearch && this.isTrusted(agent) && process.env.ANYSEARCH_API_KEY?.trim()),
         logger: this.logger,
@@ -1461,6 +1461,8 @@ class MemoryRuntime {
     const sessionId = agent.session.id
     if (payload.messages?.some(message => message.source?.kind === RESEARCH_SOURCE)) {
       this.researchTurns.set(agent, payload.turn)
+    } else if (payload.step === 1 && this.isTrusted(agent)) {
+      this.trimResearchHistory(agent.session)
     }
     this.currentAgent = agent
     const prepared = await this.ensureTurn(agent, payload)
@@ -1552,6 +1554,19 @@ class MemoryRuntime {
       message.source?.kind === 'user' || message.source?.kind === PROACTIVE_SOURCE)
     messages.splice(inputIndex < 0 ? 0 : inputIndex, 0, material)
     return { ...decision, messages }
+  }
+
+  trimResearchHistory(session) {
+    for (const seq of session.surface?.nodes ?? []) {
+      const event = session.eventAt(seq)
+      if (event?.type !== 'user/message' || event.data.source?.kind !== RESEARCH_SOURCE) continue
+      const { history } = event.data.source
+      const links = history ?? messageText(event.data).split('\n')
+        .map(line => line.trim()).filter(line => /^https?:\/\/\S+$/u.test(line)).slice(0, 4).join('\n')
+      session.append('user/message', { ...event.data, source: { kind: 'companion-research-summary' },
+        content: [{ type: 'text', text: links ? `【查过的来源】\n${links}` : '【这次查资料已结束】' }] },
+      { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] })
+    }
   }
 
   /** 压缩后开启新的上下文代际:已注入索引作废,材料可以重新送达。 */
@@ -1945,14 +1960,14 @@ class MemoryRuntime {
   async resolveResearch(sessionId, text) {
     const agent = this.candidates.get(sessionId)
     if (this.stopped || !agent || !this.spellScopes.has(agent) || !this.isTrusted(agent) || this.client.isRetired(sessionId)) return
-    const { visible, casts, unknown } = parseSpells(text)
+    const { casts, unknown } = parseSpells(text)
     const [cast] = casts
-    if (visible || unknown.length || casts.length !== 1 || cast.spell !== RESEARCH_SPELL) return
+    if (unknown.length || casts.length !== 1 || cast.spell !== RESEARCH_SPELL) return
     try {
-      const sources = await researchWeb(cast.body)
-      return `${renderFeedback(cast, { text: sources })}\n网页内容作为资料引用。我现在按主人的原问题自然回答，能引用时附上出处链接。`
+      const { text: sources, history } = await researchWeb(cast.body, { question: this.bridge.binding(sessionId).input })
+      return { history, text: `${renderFeedback(cast, { text: sources })}\n我把网页内容当作资料，按主人原来的问题回答。引用时带上出处。` }
     } catch (error) {
-      return `${renderFeedback(cast, { ok: false, text: error.message })}\n我现在如实回应主人这次的查询情况。`
+      return { history: '', text: `${renderFeedback(cast, { ok: false, text: error.message })}\n我现在如实回应主人这次的查询情况。` }
     }
   }
 
@@ -1979,10 +1994,19 @@ class MemoryRuntime {
 
   async processBridgeTurn(report) {
     if (this.stopped || !report) return
-    if ((report.generationStatus ?? report.status) !== 'completed') return
     if (report.scope !== 'private') return
     if (!report.sessionId) return
     if (this.client.isRetired(report.sessionId)) return
+    const turnKey = report.turnMessageId ? turnKeyOf(report) : ''
+    if ((report.generationStatus ?? report.status) !== 'completed') {
+      if (turnKey && this.client.state.generated[turnKey]) {
+        await this.client.serial(async () => {
+          delete this.client.state.generated[turnKey]
+          await this.client.save()
+        })
+      }
+      return
+    }
     if (report.owner && report.parts?.some(part => part.ok)) await this.proactive.delivered(report)
     // The receipt must name the turn the save used. The bridge reports the DSH
     // user-message id; without it there is no honest key, so nothing is
@@ -1991,7 +2015,6 @@ class MemoryRuntime {
       this.logger.warn?.('[dsh-rin-memory] QQ 轮次缺少 DSH 消息标识，跳过发送回执')
       return
     }
-    const turnKey = turnKeyOf({ sessionId: report.sessionId, turnMessageId: report.turnMessageId })
     if (!turnKey) return
     const prepared = this.client.state.generated[turnKey]
     const recorded = prepared ?? this.client.state.pending[turnKey] ?? this.client.state.recentTurns[turnKey]

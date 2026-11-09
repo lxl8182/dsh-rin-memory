@@ -13,7 +13,7 @@ test('serial casts preserve order, deduplicate session/seq and return real sourc
     followupOf: owner => reply => feedback.push({ owner, reply }),
   })
   const a = agent('qq-a'), b = agent('qq-b')
-  const first = runner.handleAssistantMessage(a, message('<执行>one</执行><读取>two</读取>'), 1)
+  const first = runner.handleAssistantMessage(a, message('<执行>one</执行>\n<读取>two</读取>'), 1)
   const duplicate = runner.handleAssistantMessage(a, message('<执行>one</执行>'), 1)
   const second = runner.handleAssistantMessage(b, message('<执行>three</执行>'), 1)
   await Promise.all([first, duplicate, second])

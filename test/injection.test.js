@@ -30,7 +30,7 @@ test('prepared turn is reused; background precedes the unchanged current user an
   const agent = { session: { id: 'qq-test' } }
   const turn = { requestId: 'r', injected: false }
   const runtime = { currentAgent: null, turns: new Map([[agent, turn]]),
-    sessionKeyOfAgent: () => undefined,
+    sessionKeyOfAgent: () => undefined, isTrusted: () => false,
     ensureTurn: async () => prepared, pendingTaskNotices: () => [], markInjected: async () => {} }
   const first = await MemoryRuntime.prototype.preStep.call(runtime, agent, { step: 1 },
     async () => ({ kind: 'enter', messages: [user] }))

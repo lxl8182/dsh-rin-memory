@@ -11,13 +11,20 @@ test('查资料 recognizes the spell and uses the appropriate AnySearch HTTP req
     requests.push([url, JSON.parse(init.body)])
     assert.equal(init.headers.Authorization, 'Bearer mock-key')
     const row = { url: 'https://example.com/demo', title: '试玩介绍', content: '一段正文' }
-    return Response.json({ code: 0, data: url.endsWith('/extract') ? row : { results: [row] } })
+    return Response.json({ code: 0, data: url.endsWith('/extract')
+      ? { ...row, content: '网页导航\n'.repeat(200) + '试玩时间是周五。' }
+      : { results: [row, { ...row, url: row.url + '#same-page' }] } })
   }
   const options = { key: 'mock-key', fetcher }
-  assert.match(await researchWeb(body, options), /试玩介绍\nhttps:\/\/example\.com\/demo/)
-  assert.match(await researchWeb('https://example.com/demo', options), /一段正文/)
+  const result = await researchWeb(body, options)
+  assert.match(result.text, /试玩介绍\nhttps:\/\/example\.com\/demo/)
+  assert.equal(result.text.match(/example\.com\/demo/g).length, 1)
+  assert.equal(result.history, '1. 试玩介绍\nhttps://example.com/demo')
+  const page = await researchWeb('https://example.com/demo', { ...options, question: '试玩时间是什么' })
+  assert.match(page.text, /试玩时间是周五/)
+  assert.doesNotMatch(page.text, /网页导航/)
   assert.deepEqual(requests, [
-    ['https://api.anysearch.com/v1/search', { query: body, max_results: 4 }],
+    ['https://api.anysearch.com/v1/search', { query: body, max_results: 5 }],
     ['https://api.anysearch.com/v1/extract', { url: 'https://example.com/demo' }],
   ])
 })
@@ -36,7 +43,14 @@ test('spells are lifted out of the visible text, never shown to the owner', () =
 test('several spells run in the order they were written', () => {
   const parsed = parseSpells('先看\n<读取>C:\\x</读取>\n再跑\n<执行>跑测试</执行>')
   assert.deepEqual(parsed.casts.map(s => s.spell), ['读取', '执行'])
-  assert.equal(parsed.visible, '先看\n\n再跑')
+  assert.equal(parsed.visible, '先看\n再跑')
+})
+
+test('quoted and fenced examples remain chat text, while a standalone spell is recognized', () => {
+  const quoted = ['    <执行>缩进示例</执行>', '用法是 `<执行>示例</执行>`', '> <执行>引用</执行>', '```xml', '<执行>代码</执行>', '```'].join('\n')
+  const parsed = parseSpells(quoted + '\n<查资料>近期试玩</查资料>')
+  assert.equal(parsed.visible, quoted.trim())
+  assert.deepEqual(parsed.casts, [{ spell: '查资料', body: '近期试玩' }])
 })
 
 test('an unclosed tag is not executed, it stays visible', () => {

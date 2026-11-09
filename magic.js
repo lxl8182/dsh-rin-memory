@@ -37,19 +37,24 @@ export const SPELLS = Object.freeze(['读取', '执行', '翻本子', '改写', 
  *   visible 是去掉标签后的可见正文(可能为空串),casts 按出现顺序排列。
  */
 export function parseSpells(text, learnedNames = []) {
-  const source = contactControls(text).text
+  const source = contactControls(text, { trim: false }).text
   const casts = []
   const unknown = []
   if (!source) return { visible: '', casts, unknown }
-  // 咒语名一律是 2–8 个汉字(内置的五条与学来的都满足),所以不必列举名字,
-  // 按形状认就行。认得的才是咒语,不认识的是"念了一个还没学会的咒语"。
-  const pattern = /<([\p{Script=Han}]{2,8})>([\s\S]*?)<\/\1>/gu
   const known = new Set([...SPELLS, ...learnedNames])
-  let last = 0
-  let visible = ''
-  let match
-  while ((match = pattern.exec(source)) !== null) {
-    visible += source.slice(last, match.index)
+  const visible = []
+  let fence = ''
+  for (const line of source.split(/\r?\n/)) {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+    if (marker) {
+      if (!fence) fence = marker[1]
+      else if (marker[1].startsWith(fence) && !marker[2].trim()) fence = ''
+    }
+    const match = !fence && !marker && /^ {0,3}<([\p{Script=Han}]{2,8})>(.*?)<\/\1>[ \t]*$/u.exec(line)
+    if (!match || match[2].includes(`</${match[1]}>`) || match[2].includes(`<${match[1]}>`)) {
+      visible.push(line)
+      continue
+    }
     const body = match[2].trim()
     if (known.has(match[1])) {
       if (body) casts.push({ spell: match[1], body })
@@ -59,12 +64,8 @@ export function parseSpells(text, learnedNames = []) {
       // 当成成功,继续演下去。
       unknown.push({ spell: match[1], body })
     }
-    last = match.index + match[0].length
   }
-  visible += source.slice(last)
-  // 未闭合的标签不能当咒语执行:多半是模型写了一半就停了,如实留给正文,
-  // 让用户看见"它想做什么但没说完",而不是猜一个意思去跑。
-  return { visible: visible.replace(/\n{3,}/g, '\n\n').trim(), casts, unknown }
+  return { visible: visible.join('\n').replace(/\n{3,}/g, '\n\n').trim(), casts, unknown }
 }
 
 /** 终端反馈的固定外形:回填给模型时标记来源,不冒充用户发言。 */

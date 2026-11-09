@@ -70,7 +70,7 @@ test('learned casts use the same serial runner with literal body substitution an
     runSpell: async cast => { const expanded = store.expand(cast); ran.push(expanded); return expanded.body },
     followupOf: () => reply => feedback.push(reply.content[0].text),
   })
-  await runner.handleAssistantMessage({ session: { id: 'qq-use' } }, { content: [{ type: 'text', text: '<说话>$& {body} <执行>nested</执行></说话><执行>last</执行>' }] }, 1)
+  await runner.handleAssistantMessage({ session: { id: 'qq-use' } }, { content: [{ type: 'text', text: '<说话>$& {body} <执行>nested</执行></说话>\n<执行>last</执行>' }] }, 1)
   assert.deepEqual(ran, [
     { spell: '执行', body: 'echo "$& {body} <执行>nested</执行>" "$& {body} <执行>nested</执行>"' },
     { spell: '执行', body: 'last' },

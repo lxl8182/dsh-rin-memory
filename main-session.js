@@ -49,17 +49,16 @@ export const MAGIC_SECTION = 'rin-memory:magic'
 
 /** 魔法段的正文。写法权在模型,执行权在程序;模型不得自己编造结果。 */
 const BASE_MAGIC_RULES = [
-  '【魔法技能】',
-  '我是电脑的主宰，可以通过魔法帮主人干活。',
-  '我念完动作咒语便停下来，等【终端反馈】回来，再依据实际结果继续说。终端反馈记录魔法的执行情况，主人的话记录他的想法和偏好。',
-  '1. 查阅:<读取>本地路径或内容</读取> —— 我查看这台机器上的本地路径',
+  '【我的咒语】',
+  '有事要实际动手时，我把对应咒语单独写一行。等【终端反馈】回来，我再告诉主人结果。',
+  '1. 读文件:<读取>本地路径</读取>',
   '2. 执行:<执行>具体操作</执行>',
-  '3. 翻本子:<翻本子>想找的事</翻本子> —— 我回看自己记着的事',
-  '4. 改写:<改写>旧内容 ||| 正确内容</改写> —— 主人指出记错的内容时，我把那条记忆改过来',
-  '5. 撕掉:<撕掉>要忘掉的事</撕掉> —— 主人希望忘掉某件事时，我把那条记忆撕掉',
+  '3. 翻本子:<翻本子>想找的事</翻本子>',
+  '4. 改写:<改写>旧内容 ||| 正确内容</改写> —— 主人纠正我的记忆时用',
+  '5. 撕掉:<撕掉>要忘掉的事</撕掉> —— 主人想让我忘掉一件事时用',
   // 和 3/4/5 完全同格式的一条,说明只讲"什么情况下用":这条的正文不进任何地方,
   // 程序只把主人刚说的那句交出去。所以这里一个实现细节都不写(实测见下)。
-  '6. 学到:<学到>主人希望以后一直这样做的事</学到> —— 主人明确要求以后都这么说话或相处时，我记下来',
+  '6. 学到:<学到>主人希望以后一直这样做的事</学到> —— 主人教我以后怎么说话或相处时用',
   // 元咒语只留语法,不写解释。实测(2026-10-26,每版各两轮 48 次):
   //   只留语法 69%/69% ｜ 语法+一句主动性 63% ｜ 短自然语言 42% ｜
   //   长自然语言 54% ｜ 原规格腔 60%/50%
@@ -68,13 +67,14 @@ const BASE_MAGIC_RULES = [
   // 唯一的例外是"学成学败程序会回话"这半句:学咒语是异步的(慢活派给工作
   // 会话,几分钟到十几分钟),不写清楚模型等不到结果就会自己宣布「学会了」。
   // 这不是推测 —— 2026-10-26 实测到过它编造「终端反馈:咒语【报时】学会啦」。
-  '7. 学咒语:<学咒语>名字 ||| 说明</学咒语> —— 我可以学习新的本事，学成学败程序会回话。',
+  '7. 学咒语:<学咒语>名字 ||| 说明</学咒语> —— 我等消息回来再说学得怎么样。',
   '8. 忘掉咒语:<忘掉咒语>名字</忘掉咒语>',
-  '我想以后再找主人聊时，在话末记<下次联系>明天20:30｜想问问面试怎么样了</下次联系>；也可写带时区的日期时间、等新进展或暂停。这条安排写进本子后，我继续自然交流。',
-  '我主动从材料里选了话题时，在话末记<选题>候选编号</选题>；这些记号由本子收录，主人看到的是我的聊天正文。',
-  // 这一句只影响"要不要动手"那一轮的心里活动,救回一部分被拉成分析腔的思考。
-  // 实测(2026-10-26):需要判断的输入从 2/5 回到 4/5;闲聊不受影响。
-  '我选咒语就像伸手拿东西一样自然，想到适合的咒语就直接念。',
+].join('\n')
+
+const CONTACT_RULES = [
+  '【想找主人聊天时】',
+  '我有想分享的事，也可以主动开口。想约下次就在话末写<下次联系>明天20:30｜想聊的事</下次联系>，也可以写等新进展或暂停。',
+  '我从候选材料里挑了一件，就在话末记<选题>候选编号</选题>。',
 ].join('\n')
 
 /**
@@ -88,16 +88,27 @@ const BASE_MAGIC_RULES = [
  * 位置比措辞敏感:必须始终是魔法段的**最后一行**。所以它不放进
  * BASE_MAGIC_RULES,而是由 magicText 在学到的咒语之后补上。
  */
-const THINKING_VOICE = '我怎么想就怎么写，用自己的第一人称自然地自言自语。'
+const THINKING_VOICE = '我用第一人称想事情，就像平时自言自语一样。'
 
 export function magicText({ learned = [], research = false } = {}) {
-  const lookup = research ? '\n9. 查资料:<查资料>查询词或完整网址</查资料> —— 主人问最近有什么新鲜事、当前情况或想看网页时，我先查一眼。要查时我只念这一句，等资料回来再开口。' : ''
-  const base = BASE_MAGIC_RULES + lookup
-  if (!learned.length) return `${base}\n${THINKING_VOICE}`
-  return `${base}\n【自己学会的】\n${learned.map(spell => `· ${spell.name} —— ${spell.note}`).join('\n')}\n用法：<咒语名字>正文</咒语名字>；念完同样等终端反馈。\n${THINKING_VOICE}`
+  const lookup = research ? '\n9. 查资料:<查资料>查询词或完整网址</查资料> —— 想知道最近有什么新鲜事、核实当前消息或看网页时，我先查一眼。' : ''
+  const learnedText = learned.length
+    ? `\n【自己学会的】\n${learned.map(spell => `· ${spell.name} —— ${spell.note}`).join('\n')}\n<咒语名字>正文</咒语名字>`
+    : ''
+  return `${BASE_MAGIC_RULES}${lookup}${learnedText}\n\n${CONTACT_RULES}\n${THINKING_VOICE}`
 }
 
 export const MAGIC_RULES = magicText()
+
+function awarenessText(awareness) {
+  if (typeof awareness === 'string') return awareness
+  const abilities = awareness?.capabilities
+  if (!abilities?.read) return awareness?.text ?? ''
+  const lines = ['我会顺着记得的经历和主人聊。记不清的地方，我会问一句。']
+  if (abilities.correction) lines.push('主人说我记错了，我先弄清是哪件事，再改本子。')
+  if (abilities.teaching) lines.push('主人教我以后也这样相处，我会把这句教导记下来。')
+  return lines.join('\n')
+}
 
 /** 主会话唯一保留的段:人格槽位。其余段(含宿主身份句)都不进主请求。 */
 export const PERSONA_SECTION = 'deployment:persona-prefix'
@@ -296,7 +307,7 @@ export class MainSessionScope {
     const sections = []
     if (persona) sections.push({ name: PERSONA_SECTION, text: persona })
     if (!this.chatOnly) {
-      const awareness = String(await this.currentAwareness(this.agent) ?? '')
+      const awareness = awarenessText(await this.currentAwareness(this.agent))
       if (awareness) sections.push({ name: 'rin-memory:awareness', text: awareness, interpolate: false })
     }
     sections.push({ name: this.chatOnly ? 'rin-memory:chat' : MAGIC_SECTION,
