@@ -268,6 +268,8 @@ async function fixture(t, { segment = {} } = {}) {
     noteRoute: false,
     noteText: '',
     openThreads: [],
+    friendAllowed: true,
+    friendLookupAvailable: true,
   }
   const server = createServer(async (request, response) => {
     let raw = ''
@@ -285,9 +287,14 @@ async function fixture(t, { segment = {} } = {}) {
       return
     }
     if (path === '/v1/qq/persona') {
+      if (!state.friendLookupAvailable) {
+        response.statusCode = 503
+        response.end(JSON.stringify({ code: 'unavailable' }))
+        return
+      }
       const subject = new URL(request.url, 'http://localhost').searchParams.get('subject')
       response.end(JSON.stringify({ text: '我是公开版铃芽。', revision: 1,
-        memory_allowed: subject === 'qq-friend:42', memory_enabled: true }))
+        memory_allowed: state.friendAllowed && subject === 'qq-friend:42', memory_enabled: true }))
       return
     }
     if (path === '/v1/segment/note') {
@@ -668,19 +675,19 @@ test('新段第一次请求只带允许的东西:没有原生压缩摘要、没�
 })
 
 test('获授权好友复用私聊换段与送达来源，按好友身份带入和清理', async t => {
-  const { root, config, requests } = await fixture(t, { segment: { budgetTokens: 1000, minTurns: 1 } })
+  const { root, config, requests, state } = await fixture(t, { segment: { budgetTokens: 1000, minTurns: 1 } })
   config.friendMemoryEnabled = false
   const h = host({ home: root })
   const dispose = await applyRuntime(h.ctx, config)
   t.after(dispose)
   const key = 'private:42'
   const owner = false
-  async function input(sessionId, id, text) {
+  async function input(sessionId, id, text, memorySetting = {}) {
     const agent = makeAgent(sessionId)
     agent.ctx.tools.guard = () => () => {}
     h.ctx.emit('agent/created', { agent })
     await h.bridge.prepare({ sessionId, sessionKey: key, userId: 42, scope: 'private', owner, input: text,
-      friendMemoryEnabled: true })
+      friendMemoryEnabled: true, ...memorySetting })
     return agent.preStep({ turn: 1, step: 1, messages: [
       { id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] },
     ] }, payload => ({ kind: 'enter', messages: payload.messages }))
@@ -693,11 +700,12 @@ test('获授权好友复用私聊换段与送达来源，按好友身份带入�
     parts: [{ index: 0, chars: 5, ok: true, replyText: '带一盏灯。' }] })
 
   const policy = h.services.get('companionSegmentPolicy')
-  const reason = await policy.shouldStartNewSegment(key, oldSession,
-    { owner, text: '接着聊', imageCount: 0, friendMemoryEnabled: true })
+  const continuation = { owner, userId: 42, text: '接着聊', imageCount: 0, friendMemoryEnabled: true }
+  const reason = await policy.shouldStartNewSegment(key, oldSession, continuation)
   assert.equal(reason, 'budget')
+  assert.equal(continuation.friendMemoryStatus.state, 'enabled')
   await policy.carryOverText(key, oldSession, 'qq-friend-new', reason)
-  const decision = await input('qq-friend-new', 'friend-new', '接着聊')
+  const decision = await input('qq-friend-new', 'friend-new', '接着聊', continuation)
   const carry = decision.messages.find(message => message.source?.kind === 'segment-carry').content[0].text
   assert.match(carry, /朋友: 露营清单/)
   assert.match(carry, /我: 带一盏灯/)
@@ -709,10 +717,20 @@ test('获授权好友复用私聊换段与送达来源，按好友身份带入�
   const reopened = await loadRuntime(h, config)
   assert.deepEqual(new Set(reopened.sessionsForDeletion({ source_keys: [exchange.source_key] })),
     new Set([oldSession, 'qq-friend-new']))
-  const disabled = { owner, text: '接着聊', imageCount: 0, friendMemoryEnabled: false }
-  assert.equal(await policy.shouldStartNewSegment(key, 'qq-friend-new', disabled), 'memory-off')
+  state.friendLookupAvailable = false
+  assert.equal(await policy.shouldStartNewSegment(key, 'qq-friend-new', continuation), undefined)
+  assert.equal(continuation.friendMemoryStatus.state, 'unavailable')
+  await assert.rejects(() => h.bridge.prepare({ sessionId: 'qq-friend-new', sessionKey: key, scope: 'private',
+    input: '接着聊', ...continuation }), /MEMORY_REQUIRED/)
+  state.friendLookupAvailable = true
+  state.friendAllowed = false
+  assert.equal(await policy.shouldStartNewSegment(key, 'qq-friend-new', continuation), 'memory-off')
+  assert.equal(continuation.friendMemoryStatus.state, 'ungranted')
   await policy.carryOverText(key, 'qq-friend-new', 'qq-friend-off', 'memory-off')
-  assert.equal(await policy.shouldStartNewSegment(key, 'qq-friend-off', disabled), undefined)
+  const requestCount = requests.length
+  await input('qq-friend-off', 'friend-off', '接着聊', continuation)
+  assert.ok(!requests.slice(requestCount).some(row => row.path === '/v1/context' || row.path === '/v1/qq/persona'))
+  assert.equal(await policy.shouldStartNewSegment(key, 'qq-friend-off', continuation), undefined)
 })
 
 test('空闲只认真实用户互动:主动消息与后台任务不重置计时', async t => {

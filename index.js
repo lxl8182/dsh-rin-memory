@@ -1331,18 +1331,45 @@ class MemoryRuntime {
     return this.client.scope(sessionId, this.memorySubject(sessionId))
   }
 
+  async readFriendPersona(userId) {
+    this.publicQqPersonaCheckedAt = Date.now()
+    const persona = await this.client.request('/v1/qq/persona', { subject: `qq-friend:${userId}` },
+      'GET', AbortSignal.timeout(800))
+    if (typeof persona.text === 'string') this.publicQqPersona = persona.text
+    if (typeof persona.memory_enabled === 'boolean') this.memoryEnabled = persona.memory_enabled
+    return persona
+  }
+
+  async checkFriendMemory(input) {
+    const checkedAt = new Date().toISOString()
+    if (!(input.friendMemoryEnabled ?? this.config.friendMemoryEnabled)) {
+      if (Date.now() - (this.publicQqPersonaCheckedAt ?? 0) >= 30000) {
+        const refresh = this.readFriendPersona(input.userId).catch(() => {})
+        if (this.publicQqPersona === undefined) await refresh
+      }
+      return { state: 'off', checkedAt }
+    }
+    try {
+      const { memory_allowed, memory_enabled } = await this.readFriendPersona(input.userId)
+      if (memory_allowed === false) return { state: 'ungranted', checkedAt }
+      if (memory_enabled === false) return { state: 'paused', checkedAt }
+      if (memory_allowed === true && memory_enabled === true) return { state: 'enabled', checkedAt }
+    } catch {
+      // A failed check is retried for a session that already used memory.
+    }
+    return { state: 'unavailable', checkedAt }
+  }
+
   async prepareBridgeInput(input) {
     if (this.stopped) return
     if (!input.owner || input.scope !== 'private') {
       const agent = this.candidates.get(input.sessionId)
-      let grant
-      if (input.scope === 'private' && agent) {
+      const memoryStatus = input.friendMemoryStatus?.state
+      let grant = memoryStatus === undefined ? undefined : memoryStatus === 'enabled'
+      if (input.scope === 'private' && agent && memoryStatus === undefined) {
         try {
-          const publicPersona = await this.client.request('/v1/qq/persona',
-            { subject: `qq-friend:${input.userId}` }, 'GET', AbortSignal.timeout(800))
-          if (typeof publicPersona.text === 'string') this.publicQqPersona = publicPersona.text
+          const publicPersona = await this.readFriendPersona(input.userId)
           if (typeof publicPersona.memory_allowed === 'boolean') grant = publicPersona.memory_allowed
-          if (typeof publicPersona.memory_enabled === 'boolean') this.memoryEnabled = publicPersona.memory_enabled
         } catch {
           // The bound QQ preset supplies the public voice when RIN is unavailable.
         }
@@ -1359,7 +1386,11 @@ class MemoryRuntime {
       input.chatOnlyReady = !!agent && this.chatScopes.has(agent)
       if (!this.memorySubject(input.sessionId)) {
         const attached = this.attached.get(agent)
-        if (attached && input.friendMemoryEnabled !== false) {
+        const used = memoryStatus && this.client.state.references[sessionScopeId(input.sessionId)]
+        if (memoryStatus === 'unavailable' && (attached || used)) {
+          throw new Error('MEMORY_REQUIRED: 好友记忆服务暂时不可用。')
+        }
+        if (attached && (memoryStatus === undefined || used) && input.friendMemoryEnabled !== false) {
           throw new Error('MEMORY_REQUIRED: 好友记忆权限已变化，请重新开启私聊会话。')
         }
         if (attached) {
@@ -2230,11 +2261,13 @@ export function segmentPolicyFor(runtime) {
       const record = runtime.segments.current(sessionKey)
       if (input?.owner === false) {
         const enabled = input.friendMemoryEnabled ?? runtime.config.friendMemoryEnabled
-        if (!enabled) {
-          const used = runtime.client.state.references[sessionScopeId(sessionId)]
+        if (input.userId !== undefined) input.friendMemoryStatus = await runtime.checkFriendMemory(input)
+        const state = input.friendMemoryStatus?.state
+        const used = runtime.client.state.references[sessionScopeId(sessionId)]
+        if (!enabled || state === 'ungranted' || state === 'paused') {
           return used ? 'memory-off' : undefined
         }
-        if (runtime.memoryEnabled === false) return undefined
+        if (state === 'unavailable' || runtime.memoryEnabled === false) return undefined
       }
       if (!record || !input || record.session_id !== sessionId) return runtime.segmentSwitchReason(sessionKey, sessionId, input)
       const agent = runtime.candidates.get(sessionId)
