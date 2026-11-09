@@ -260,7 +260,6 @@ export class ProactiveRuntime {
     if (candidate?.friend) {
       const lastProactive = Date.parse(activity.last_proactive) || 0
       return Date.parse(activity.last_inbound) > lastProactive && Date.parse(now) - lastContactAt(activity) >= day
-        && Date.parse(now) - lastProactive >= 7 * day
     }
     if (activity.day === clock.date && (activity.count ?? 0) >= this.config.dailyLimit) return false
     return Date.parse(now) - lastContactAt(activity) >= this.config.minGapMinutes * 60000

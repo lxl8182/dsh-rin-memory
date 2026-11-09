@@ -74,8 +74,6 @@ const SEGMENT_SOURCE = 'segment-carry'
 const SEGMENT_CARRY_NOTE = '以下是先前聊过的原话，保留当时的说话者和顺序。'
 const SEGMENT_RESUME = /昨天|昨晚|前天|上次|上回|之前|先前|还记得|接着|继续|原话|yesterday|last time|continue|pick up|(?:呢|怎么样了|了吗)[？?。！!\s]*$/i
 const RECENT_CARRY_TURNS = 5
-const FRIEND_SEARCH_WINDOW_MS = 10 * 60000
-const FRIEND_SEARCH_LIMIT = 3
 
 /**
  * 宿主的人格槽位名。
@@ -1997,23 +1995,11 @@ class MemoryRuntime {
         const memory = await this.spellRecall(cast.body, agent)
         return { history: '', text: `${renderFeedback(cast, { text: memory })}\n我用记得的内容自然回应原来的问题。` }
       }
-      if (!binding.owner) await this.reserveFriendSearch(binding.sessionKey)
       const { text: sources, history } = await researchWeb(cast.body, { question: binding.input })
       return { history, text: `${renderFeedback(cast, { text: sources })}\n我把网页内容当作资料，按原来的问题回答。引用时带上出处。` }
     } catch (error) {
       return { history: '', text: `${renderFeedback(cast, { ok: false, text: error.message })}\n我现在如实回应这次的查询情况。` }
     }
-  }
-
-  async reserveFriendSearch(key) {
-    await this.client.serial(async () => {
-      const now = Date.now()
-      const searches = this.proactive.state.searches ??= {}
-      const recent = (searches[key] ?? []).filter(at => now - at < FRIEND_SEARCH_WINDOW_MS)
-      if (recent.length >= FRIEND_SEARCH_LIMIT) throw new Error('刚查了几次资料，过一会儿再查吧。')
-      searches[key] = [...recent, now]
-      await this.client.save()
-    })
   }
 
   /**

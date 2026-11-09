@@ -165,6 +165,7 @@ test('friend contact uses only their own follow-up and rechecks permission befor
   const p = new ProactiveRuntime(runtime)
   try {
     await p.observe(binding)
+    p.state.activity[binding.sessionKey].last_proactive = '2026-10-28T04:00:00Z'
     advance(23 * 3600000)
     await p.tick()
     assert.equal(followups.length, 0)
