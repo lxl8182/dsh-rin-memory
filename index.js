@@ -72,7 +72,10 @@ const SEGMENT_SOURCE = 'segment-carry'
 
 /** 带入历史前的一句来源说明。只说明「这不是新发言」,不复述内容。 */
 const SEGMENT_CARRY_NOTE = '以下是先前聊过的原话，保留当时的说话者和顺序。'
-const SEGMENT_RESUME = /昨天|昨晚|前天|上次|上回|之前|先前|还记得|接着|继续|原话|yesterday|last time|continue|pick up/i
+const SEGMENT_RESUME = /昨天|昨晚|前天|上次|上回|之前|先前|还记得|接着|继续|原话|yesterday|last time|continue|pick up|(?:呢|怎么样了|了吗)[？?。！!\s]*$/i
+const RECENT_CARRY_TURNS = 5
+const FRIEND_SEARCH_WINDOW_MS = 10 * 60000
+const FRIEND_SEARCH_LIMIT = 3
 
 /**
  * 宿主的人格槽位名。
@@ -445,8 +448,12 @@ class MemoryRuntime {
 
   /** <翻本子>:列出服务里记着的条目,只读。 */
   async spellRecall(body, agent) {
-    this.spellSession(agent)
-    const result = await this.client.entries(String(body ?? '').trim())
+    const sessionId = agent?.session?.id
+    const subject = sessionId && this.memorySubject(sessionId)
+    if (!subject) throw new Error('这个会话没有个人记忆权限。')
+    if (this.client.isRetired(sessionId)) throw new Error('原会话已清理，等新会话。')
+    const query = String(body ?? '').trim()
+    const result = await this.client.entries(query === '最近记忆' ? '' : query, subject)
     const items = (result.items ?? []).slice(0, 20)
     if (items.length === 0) return '本子上还没写什么。'
     return items.map(row => {
@@ -1059,10 +1066,12 @@ class MemoryRuntime {
    */
   async onSegmentSwitched(sessionKey, { previousSessionId, sessionId, reason } = {}) {
     if (this.stopped || !sessionKey) return
-    const exchanges = reason === 'memory-off' ? [] : this.segments.carry(sessionKey).exchanges
+    const mode = ['idle', 'age'].includes(reason) ? 'topic' : 'budget'
+    const exchanges = reason === 'memory-off' ? [] : this.segments.carry(sessionKey,
+      mode === 'budget' ? RECENT_CARRY_TURNS : undefined).exchanges
     await this.segments.begin(sessionKey, { sessionId,
       previousSessionId: reason === 'memory-off' ? undefined : previousSessionId, reason, handoff: {
-      mode: ['idle', 'age'].includes(reason) ? 'topic' : 'budget', exchanges,
+      mode, exchanges,
     } })
     if (sessionId) {
       await this.resetInjected(sessionId).catch(error => {
@@ -1363,11 +1372,15 @@ class MemoryRuntime {
     return { state: 'unavailable', checkedAt }
   }
 
-  async prepareBridgeInput(input) {
+  async prepareBridgeInput(input, restoring = false) {
     if (this.stopped) return
+    const candidate = this.candidates.get(input.sessionId)
+    if (candidate && input.scope === 'private' && !restoring) this.trimResearchHistory(candidate.session)
     if (!input.owner || input.scope !== 'private') {
-      const agent = this.candidates.get(input.sessionId)
+      const agent = candidate
+      if (restoring && input.scope === 'private') input = { ...input, friendMemoryStatus: await this.checkFriendMemory(input) }
       const memoryStatus = input.friendMemoryStatus?.state
+      if (input.friendMemoryStatus) this.bridge?.noteFriendMemory?.(input.sessionId, input.friendMemoryStatus)
       let grant = memoryStatus === undefined ? undefined : memoryStatus === 'enabled'
       if (input.scope === 'private' && agent && memoryStatus === undefined) {
         try {
@@ -1381,6 +1394,11 @@ class MemoryRuntime {
         this.detach(agent)
         const isolation = new MainSessionScope(agent, { chatOnly: true, logger: this.logger,
           managedCompaction: input.scope === 'group',
+          readOnlySpells: input.scope === 'private' ? () => ({
+            research: Boolean(this.bridge?.resolveResearch && process.env.ANYSEARCH_API_KEY?.trim()),
+            recall: this.memoryEnabled !== false && this.bridge?.canContact?.(agent.session.id)
+              && Boolean(this.memorySubject(agent.session.id)),
+          }) : undefined,
           currentPersona: input.scope === 'private' ? () => this.publicQqPersona : undefined })
         if (!isolation.install()) throw new Error('QQ 纯聊天隔离未就绪，请检查 DSH 插件状态。')
         this.chatScopes.set(agent, isolation)
@@ -1406,7 +1424,12 @@ class MemoryRuntime {
     }
     if (!input.sessionId) throw new Error('MEMORY_REQUIRED: 缺少 QQ 会话绑定')
     const sessionId = input.sessionId
-    if (input.owner) await this.proactive.observe(input)
+    if (restoring) {
+      if (candidate) this.attach(candidate)
+      if (!input.owner) this.chatScopes.get(candidate)?.setManagedCompaction(true)
+      return
+    }
+    await this.proactive.observe(input)
     this.client.state.sessions[sessionScopeId(sessionId)] = sessionId
     await this.client.save()
     const agent = this.candidates.get(sessionId)
@@ -1461,7 +1484,7 @@ class MemoryRuntime {
     const sessionId = agent.session.id
     if (payload.messages?.some(message => message.source?.kind === RESEARCH_SOURCE)) {
       this.researchTurns.set(agent, payload.turn)
-    } else if (payload.step === 1 && this.isTrusted(agent)) {
+    } else if (payload.step === 1 && payload.messages?.some(message => message.source?.kind === PROACTIVE_SOURCE)) {
       this.trimResearchHistory(agent.session)
     }
     this.currentAgent = agent
@@ -1959,16 +1982,38 @@ class MemoryRuntime {
 
   async resolveResearch(sessionId, text) {
     const agent = this.candidates.get(sessionId)
-    if (this.stopped || !agent || !this.spellScopes.has(agent) || !this.isTrusted(agent) || this.client.isRetired(sessionId)) return
+    const binding = this.bridge?.binding?.(sessionId)
+    if (this.stopped || !agent || binding?.scope !== 'private' || this.client.isRetired(sessionId)
+      || (!this.spellScopes.has(agent) && !this.chatScopes.has(agent))) return
     const { casts, unknown } = parseSpells(text)
     const [cast] = casts
-    if (unknown.length || casts.length !== 1 || cast.spell !== RESEARCH_SPELL) return
+    if (unknown.length || casts.length !== 1 || ![RESEARCH_SPELL, '翻本子'].includes(cast.spell)
+      || (binding.owner && cast.spell === '翻本子')) return
     try {
-      const { text: sources, history } = await researchWeb(cast.body, { question: this.bridge.binding(sessionId).input })
-      return { history, text: `${renderFeedback(cast, { text: sources })}\n我把网页内容当作资料，按主人原来的问题回答。引用时带上出处。` }
+      if (cast.spell === '翻本子') {
+        if (this.memoryEnabled === false || !this.bridge.canContact?.(sessionId)) {
+          throw new Error('这个会话没有个人记忆权限。')
+        }
+        const memory = await this.spellRecall(cast.body, agent)
+        return { history: '', text: `${renderFeedback(cast, { text: memory })}\n我用记得的内容自然回应原来的问题。` }
+      }
+      if (!binding.owner) await this.reserveFriendSearch(binding.sessionKey)
+      const { text: sources, history } = await researchWeb(cast.body, { question: binding.input })
+      return { history, text: `${renderFeedback(cast, { text: sources })}\n我把网页内容当作资料，按原来的问题回答。引用时带上出处。` }
     } catch (error) {
-      return { history: '', text: `${renderFeedback(cast, { ok: false, text: error.message })}\n我现在如实回应主人这次的查询情况。` }
+      return { history: '', text: `${renderFeedback(cast, { ok: false, text: error.message })}\n我现在如实回应这次的查询情况。` }
     }
+  }
+
+  async reserveFriendSearch(key) {
+    await this.client.serial(async () => {
+      const now = Date.now()
+      const searches = this.proactive.state.searches ??= {}
+      const recent = (searches[key] ?? []).filter(at => now - at < FRIEND_SEARCH_WINDOW_MS)
+      if (recent.length >= FRIEND_SEARCH_LIMIT) throw new Error('刚查了几次资料，过一会儿再查吧。')
+      searches[key] = [...recent, now]
+      await this.client.save()
+    })
   }
 
   /**
@@ -2007,7 +2052,7 @@ class MemoryRuntime {
       }
       return
     }
-    if (report.owner && report.parts?.some(part => part.ok)) await this.proactive.delivered(report)
+    if (this.memorySubject(report.sessionId) && report.parts?.some(part => part.ok)) await this.proactive.delivered(report)
     // The receipt must name the turn the save used. The bridge reports the DSH
     // user-message id; without it there is no honest key, so nothing is
     // recorded rather than guessing one and creating an orphan receipt.

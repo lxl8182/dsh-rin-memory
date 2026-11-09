@@ -465,11 +465,12 @@ export class SegmentStore {
   }
 
   /** 按参数挑出要带进新段的交换。 */
-  carry(sessionKey) {
+  carry(sessionKey, maxTurns = this.limits.carryTurns) {
     const record = this.segments[sessionKey]
     const inherited = record?.handoff?.adopted ? record.handoff.exchanges : []
     return selectCarry({ exchanges: [...inherited, ...(record?.exchanges ?? [])]
-      .filter(item => item.source_key).sort((a, b) => a.at - b.at) }, this.limits)
+      .filter(item => item.source_key).sort((a, b) => a.at - b.at) },
+    { ...this.limits, carryTurns: Math.min(maxTurns, this.limits.carryTurns) })
   }
 
   blank(sessionKey, at = this.now()) {

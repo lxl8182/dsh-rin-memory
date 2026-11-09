@@ -493,9 +493,9 @@ export class MemoryClient {
 
   // -- memory tools ----------------------------------------------------
 
-  async entries(text = '') {
+  async entries(text = '', subject = this.config.subject) {
     return await this.request('/v1/memory/entries', {
-      subject: this.config.subject,
+      subject,
       text,
     }, 'GET')
   }

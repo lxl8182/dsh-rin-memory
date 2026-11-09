@@ -137,14 +137,48 @@ test('chat clocks are sparse, refresh at midnight, and proactive clocks stay cur
   const proactive = new ProactiveRuntime(runtime), scope = sessionScopeId(agent.session.id)
   const first = runtime.client.now()
   assert.match(proactive.chatClockMaterial(agent.session.id), /2026-10-29 12:00/)
-  runtime.client.state.injected = { [scope]: { 'clock:previous': first } }
+  runtime.client.state.injected = { [scope]: { 'clock:previous': { at: first, messageId: 'memory:clock' } } }
   advance(60000)
   assert.equal(proactive.chatClockMaterial(agent.session.id), '')
   assert.match(proactive.clockMaterial(agent.session.id), /12:01/)
   advance(59 * 60000)
-  assert.match(proactive.chatClockMaterial(agent.session.id), /13:00/)
+  assert.equal(proactive.chatClockMaterial(agent.session.id), '')
+  advance(3 * 3600000)
+  assert.match(proactive.chatClockMaterial(agent.session.id), /16:00/)
   runtime.client.state.injected[scope] = { 'clock:night': '2026-10-29T15:59:00Z' }
+  assert.equal(proactive.chatClockMaterial(agent.session.id, '2026-10-29T15:59:30Z'), '')
   assert.match(proactive.chatClockMaterial(agent.session.id, '2026-10-29T16:01:00Z'), /2026-10-30 00:01/)
+})
+
+test('friend contact uses only their own follow-up and rechecks permission before sending', async () => {
+  const { runtime, agent, context, calls, followups, sent, complete, advance } = harness()
+  const binding = runtime.bridge.binding(agent.session.id), subject = 'qq-friend:42'
+  binding.owner = false
+  let permitted = true
+  runtime.bridge.canContact = () => permitted
+  runtime.memorySubject = () => subject
+  runtime.memoryScope = id => ({ ...runtime.client.scope(id), subject })
+  context.working_summary.sections.open_threads.items = [
+    { thread_id: 'shared', text: '露营计划', next_step: '问问营地选好了没',
+      updated_at: runtime.client.now(), source_keys: ['shared-source'] },
+  ]
+  const p = new ProactiveRuntime(runtime)
+  try {
+    await p.observe(binding)
+    advance(23 * 3600000)
+    await p.tick()
+    assert.equal(followups.length, 0)
+    advance(2 * 3600000)
+    await p.tick()
+    const [{ candidate_id: candidate, kind }] = p.active.get(agent.session.id).candidates
+    assert.equal(kind, 'followup')
+    assert.equal(p.active.get(agent.session.id).candidates.length, 1)
+    permitted = false
+    await complete(p, `营地选好啦吗？<选题>${candidate}</选题>`)
+    assert.equal(sent.length, 0)
+    assert.equal(calls.some(call => call.path === '/v1/outputs'), false)
+    assert.equal(calls.filter(call => call.path === '/v1/working-summary').at(-1).body.subject, subject)
+  } finally { p.stop() }
 })
 
 test('contact tags are private, time-zone anchored, idempotent and never ordinary spells', async () => {

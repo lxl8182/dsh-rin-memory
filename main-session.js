@@ -46,14 +46,17 @@ export const MAIN_SESSION_TOOLS = Object.freeze([])
  * 只有学习或忘掉咒语时更新正文，不含时间、版本或每轮数据。
  */
 export const MAGIC_SECTION = 'rin-memory:magic'
+const RECALL_RULE = '翻本子:<翻本子>想找的事</翻本子>'
+const RESEARCH_RULE = '查资料:<查资料>查询词或完整网址</查资料> —— 想知道最近有什么新鲜事、核实当前消息或看网页时，我先查一眼。'
+const CAST_RULE = '有事要实际动手时，我把对应咒语单独写一行。等【终端反馈】回来，我再告诉对方结果。'
 
 /** 魔法段的正文。写法权在模型,执行权在程序;模型不得自己编造结果。 */
 const BASE_MAGIC_RULES = [
   '【我的咒语】',
-  '有事要实际动手时，我把对应咒语单独写一行。等【终端反馈】回来，我再告诉主人结果。',
+  CAST_RULE,
   '1. 读文件:<读取>本地路径</读取>',
   '2. 执行:<执行>具体操作</执行>',
-  '3. 翻本子:<翻本子>想找的事</翻本子>',
+  '3. ' + RECALL_RULE,
   '4. 改写:<改写>旧内容 ||| 正确内容</改写> —— 主人纠正我的记忆时用',
   '5. 撕掉:<撕掉>要忘掉的事</撕掉> —— 主人想让我忘掉一件事时用',
   // 和 3/4/5 完全同格式的一条,说明只讲"什么情况下用":这条的正文不进任何地方,
@@ -91,7 +94,7 @@ const CONTACT_RULES = [
 const THINKING_VOICE = '我用第一人称想事情，就像平时自言自语一样。'
 
 export function magicText({ learned = [], research = false } = {}) {
-  const lookup = research ? '\n9. 查资料:<查资料>查询词或完整网址</查资料> —— 想知道最近有什么新鲜事、核实当前消息或看网页时，我先查一眼。' : ''
+  const lookup = research ? '\n9. ' + RESEARCH_RULE : ''
   const learnedText = learned.length
     ? `\n【自己学会的】\n${learned.map(spell => `· ${spell.name} —— ${spell.note}`).join('\n')}\n<咒语名字>正文</咒语名字>`
     : ''
@@ -99,6 +102,14 @@ export function magicText({ learned = [], research = false } = {}) {
 }
 
 export const MAGIC_RULES = magicText()
+
+function readOnlyMagic({ research, recall } = {}) {
+  const rules = [
+    research ? RESEARCH_RULE : '',
+    recall ? RECALL_RULE + ' —— 对方明确问起我记不记得以前聊过的事时，用话题关键词查；泛问时写「最近记忆」。' : '',
+  ].filter(Boolean)
+  return rules.length ? ['【我的咒语】', CAST_RULE, ...rules, THINKING_VOICE].join('\n') : THINKING_VOICE
+}
 
 function awarenessText(awareness) {
   if (typeof awareness === 'string') return awareness
@@ -173,13 +184,15 @@ export class MainSessionScope {
    * @param {object} [options.logger]
    * @param {boolean} [options.chatOnly] 使用公开聊天人设和工具隔离。
    */
-  constructor(agent, { currentPersona, currentAwareness = () => '', learned = () => [], research = () => false, chatOnly = false,
+  constructor(agent, { currentPersona, currentAwareness = () => '', learned = () => [], research = () => false,
+    readOnlySpells = () => undefined, chatOnly = false,
     managedCompaction = !chatOnly, logger = console } = {}) {
     this.agent = agent
     this.currentPersona = currentPersona ?? (() => '')
     this.currentAwareness = currentAwareness
     this.learned = learned
     this.research = research
+    this.readOnlySpells = readOnlySpells
     this.chatOnly = chatOnly
     this.managedCompaction = managedCompaction
     this.logger = logger
@@ -311,7 +324,7 @@ export class MainSessionScope {
       if (awareness) sections.push({ name: 'rin-memory:awareness', text: awareness, interpolate: false })
     }
     sections.push({ name: this.chatOnly ? 'rin-memory:chat' : MAGIC_SECTION,
-      text: this.chatOnly ? THINKING_VOICE : magicText({ learned: this.learned(), research: this.research() }), interpolate: false })
+      text: this.chatOnly ? readOnlyMagic(this.readOnlySpells()) : magicText({ learned: this.learned(), research: this.research() }), interpolate: false })
     // tools 恒为空:不是"过滤",而是明确不报送任何 schema——见 MAIN_SESSION_TOOLS
     // 上方的实测说明。少了这个字段,thinking 才留在角色里。
     // 可选运行上下文清空；required 工作目录由本会话的空正文注册覆盖。
