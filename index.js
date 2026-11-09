@@ -907,8 +907,7 @@ class MemoryRuntime {
   /**
    * 一条删除涉及的 DSH 会话。
    *
-   * 服务端待办只给出 source_key / episode_ids;两者都由本插件构造,会话段就
-   * 在里面。匹配不到就不猜会话,确认时如实说明无本地正文需要清理。
+   * 从服务端的来源、经历和消费记录定位会话，并补入本地已登记的引用。
    */
   sessionsForDeletion(item) {
     const found = new Set()
@@ -927,6 +926,7 @@ class MemoryRuntime {
     }
     for (const key of item.source_keys ?? []) collect(key)
     for (const episode of item.episode_ids ?? []) collect(episode)
+    for (const session of item.consumer_sessions ?? []) found.add(session)
     const ids = new Set(item.memory_ids ?? [])
     const sources = new Set(item.source_keys ?? [])
     const versions = new Set(item.persona_versions ?? [])

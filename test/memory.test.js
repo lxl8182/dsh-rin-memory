@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import { apply, Config, MEMORY_RULES, RULES_CHAR_LIMIT, renderIncrement } from '../index.js'
-import { MemoryClient, classifyHttpError } from '../memory-client.js'
+import { MemoryClient, classifyHttpError, sessionScopeId } from '../memory-client.js'
 import { decodeLog, deleteSessionDirectory, listSessionDirectories } from '../session-store.js'
 
 /**
@@ -454,7 +454,7 @@ test('a cleanup pending blocks replay, deletes the named session, and only then 
   await mkdir(sessionDir, { recursive: true })
   await writeFile(join(sessionDir, 'session.v4.jsonl.zstd'),
     zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'user/message', text: '记住我喜欢红茶' })}\n`)))
-  for (const id of ['qq-cached', 'qq-unrelated']) {
+  for (const id of ['qq-cached', 'qq-from-receipt', 'qq-unrelated']) {
     const directory = join(project, id)
     await mkdir(directory, { recursive: true })
     await writeFile(join(directory, 'session.v4.jsonl'), 'synthetic log')
@@ -471,6 +471,7 @@ test('a cleanup pending blocks replay, deletes the named session, and only then 
   f.state.cleanup = [{
     deletion_id: 'deletion-1',
     memory_ids: ['fact-1'],
+    consumer_sessions: [sessionScopeId('qq-from-receipt')],
     source_keys: [Object.keys(JSON.parse(await readFile(join(f.root, 'outbox.json'), 'utf8')).pending)[0]
       ? 'plugin:dsh_memory:companion:private:qq-owner:dsh_placeholder' : ''],
   }]
