@@ -57,6 +57,40 @@ test('QQ scope skips native pressure and overflow compression; workers and unloa
   assert.equal(service.compactIfNeeded, native)
 })
 
+test('QQ friend chat uses the local date and resolves a labeled lookup with tools still empty', async t => {
+  const f = fixture(), agent = f.agent('qq-friend')
+  const previousKey = process.env.ANYSEARCH_API_KEY
+  process.env.ANYSEARCH_API_KEY = 'mock-key'
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.ANYSEARCH_API_KEY
+    else process.env.ANYSEARCH_API_KEY = previousKey
+  })
+  let now = '2026-11-09T16:01:00Z'
+  f.runtime.client.now = () => now
+  f.runtime.bridge = { binding: id => id === agent.session.id
+    ? { owner: false, scope: 'private', input: '最近的求职方向' } : undefined, resolveResearch() {} }
+  f.runtime.observeAgent(agent)
+  await f.runtime.prepareBridgeInput({ sessionId: agent.session.id, owner: false, scope: 'private', userId: 42 })
+  const scope = f.runtime.chatScopes.get(agent)
+  const next = async () => ({ sections: [], tools: [{ name: 'search' }], contexts: [] })
+  const first = await scope.shapeAssembly({}, next)
+  assert.deepEqual(first.tools, [])
+  assert.match(first.sections.find(row => row.name === 'rin-memory:date').text, /2026-11-10/)
+  assert.match(first.sections.find(row => row.name === 'rin-memory:chat').text, /<查资料>/)
+  now = '2026-11-10T04:00:00Z'
+  assert.deepEqual((await scope.shapeAssembly({}, next)).sections, first.sections)
+  const query = '2026 年 11 月 软件工程 招聘'
+  const fetch = t.mock.method(globalThis, 'fetch', async () => Response.json({
+    code: 0, data: { results: [{ title: '招聘资讯', url: 'https://example.com/jobs' }] },
+  }))
+  const result = await f.runtime.resolveResearch(agent.session.id, `查资料:<查资料>${query}</查资料>`)
+  assert.equal(fetch.mock.callCount(), 1)
+  assert.equal(JSON.parse(fetch.mock.calls[0].arguments[1].body).query, query)
+  assert.match(result.text, /终端反馈·查资料/)
+  assert.match(result.history, /example\.com\/jobs/)
+  f.runtime.detach(agent)
+})
+
 function fixture() {
   const feedback = [], workers = [], hooks = new Map()
   // 工作会话的工具由 preset 挂载;这里给出最小可用的注册表与工具视图。

@@ -46,9 +46,9 @@ export const MAIN_SESSION_TOOLS = Object.freeze([])
  * 只有学习或忘掉咒语时更新正文，不含时间、版本或每轮数据。
  */
 export const MAGIC_SECTION = 'rin-memory:magic'
-const RECALL_RULE = '翻本子:<翻本子>想找的事</翻本子>'
-const RESEARCH_RULE = '查资料:<查资料>查询词或完整网址</查资料> —— 想知道最近有什么新鲜事、核实当前消息或看网页时，我先查一眼。'
-const CAST_RULE = '有事要实际动手时，我把对应咒语单独写一行。等【终端反馈】回来，我再告诉对方结果。'
+const RECALL_RULE = '<翻本子>想找的事</翻本子>'
+const RESEARCH_RULE = '<查资料>查询词或完整网址</查资料> —— 想知道近况、核实消息或看网页时，我先查一眼。查近况时，我用今天的年月确定查询范围。'
+const CAST_RULE = '有事要实际动手时，我单独写一行，从开标签写到闭标签。等【终端反馈】回来，我再告诉对方结果。'
 
 /** 魔法段的正文。写法权在模型,执行权在程序;模型不得自己编造结果。 */
 const BASE_MAGIC_RULES = [
@@ -185,7 +185,7 @@ export class MainSessionScope {
    * @param {boolean} [options.chatOnly] 使用公开聊天人设和工具隔离。
    */
   constructor(agent, { currentPersona, currentAwareness = () => '', learned = () => [], research = () => false,
-    readOnlySpells = () => undefined, chatOnly = false,
+    readOnlySpells = () => undefined, currentDate = () => '', chatOnly = false,
     managedCompaction = !chatOnly, logger = console } = {}) {
     this.agent = agent
     this.currentPersona = currentPersona ?? (() => '')
@@ -193,6 +193,7 @@ export class MainSessionScope {
     this.learned = learned
     this.research = research
     this.readOnlySpells = readOnlySpells
+    this.currentDate = currentDate
     this.chatOnly = chatOnly
     this.managedCompaction = managedCompaction
     this.logger = logger
@@ -323,6 +324,9 @@ export class MainSessionScope {
       const awareness = awarenessText(await this.currentAwareness(this.agent))
       if (awareness) sections.push({ name: 'rin-memory:awareness', text: awareness, interpolate: false })
     }
+    const date = this.currentDate()
+    if (date) sections.push({ name: 'rin-memory:date',
+      text: `今天是 ${date}。我以这个日期理解「最近」和「今年」。`, interpolate: false })
     sections.push({ name: this.chatOnly ? 'rin-memory:chat' : MAGIC_SECTION,
       text: this.chatOnly ? readOnlyMagic(this.readOnlySpells()) : magicText({ learned: this.learned(), research: this.research() }), interpolate: false })
     // tools 恒为空:不是"过滤",而是明确不报送任何 schema——见 MAIN_SESSION_TOOLS

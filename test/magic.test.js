@@ -47,8 +47,8 @@ test('several spells run in the order they were written', () => {
 })
 
 test('quoted and fenced examples remain chat text, while a standalone spell is recognized', () => {
-  const quoted = ['    <执行>缩进示例</执行>', '用法是 `<执行>示例</执行>`', '> <执行>引用</执行>', '```xml', '<执行>代码</执行>', '```'].join('\n')
-  const parsed = parseSpells(quoted + '\n<查资料>近期试玩</查资料>')
+  const quoted = ['    <执行>缩进示例</执行>', '用法是 `<执行>示例</执行>`', '> 查资料:<查资料>引用</查资料>', '```xml', '查资料：<查资料>代码</查资料>', '```'].join('\n')
+  const parsed = parseSpells(quoted + '\n查资料：<查资料>近期试玩</查资料>')
   assert.equal(parsed.visible, quoted.trim())
   assert.deepEqual(parsed.casts, [{ spell: '查资料', body: '近期试玩' }])
 })

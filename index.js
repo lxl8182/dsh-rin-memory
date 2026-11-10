@@ -19,6 +19,7 @@ import {
 import { configProblems, normalizeConfig } from './config.js'
 import { randomUUID } from 'node:crypto'
 import { ProactiveRuntime, PROACTIVE_SOURCE } from './proactive.js'
+import { localClock } from './contact.js'
 import {
   IMAGE_TOKENS, OUTPUT_HEADROOM, SEGMENT_DEFAULTS, SegmentStore, deleteSessionDirectory,
   estimateMessages, estimateTokens, listSessionDirectories, renderCarry, selectCarry,
@@ -1253,6 +1254,7 @@ class MemoryRuntime {
         currentAwareness: () => this.awareness.get(sessionId),
         learned: () => this.spellLibrary.list(),
         research: () => Boolean(this.bridge?.resolveResearch && this.isTrusted(agent) && process.env.ANYSEARCH_API_KEY?.trim()),
+        currentDate: () => this.privateChatDate(sessionId),
         logger: this.logger,
       })
       isolation.install()
@@ -1370,6 +1372,12 @@ class MemoryRuntime {
     return { state: 'unavailable', checkedAt }
   }
 
+  privateChatDate(sessionId) {
+    if (this.bridge?.binding?.(sessionId)?.scope !== 'private') return ''
+    const timezone = this.proactive.config.timezone
+    return `${localClock(this.proactive.now(), timezone).date}（${timezone}）`
+  }
+
   async prepareBridgeInput(input, restoring = false) {
     if (this.stopped) return
     const candidate = this.candidates.get(input.sessionId)
@@ -1397,6 +1405,7 @@ class MemoryRuntime {
             recall: this.memoryEnabled !== false && this.bridge?.canContact?.(agent.session.id)
               && Boolean(this.memorySubject(agent.session.id)),
           }) : undefined,
+          currentDate: () => this.privateChatDate(agent.session.id),
           currentPersona: input.scope === 'private' ? () => this.publicQqPersona : undefined })
         if (!isolation.install()) throw new Error('QQ 纯聊天隔离未就绪，请检查 DSH 插件状态。')
         this.chatScopes.set(agent, isolation)
