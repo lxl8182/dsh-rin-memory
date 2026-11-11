@@ -47,7 +47,7 @@ test('search retries once with the exact name and specification from the origina
         ...(requests.length === 2 ? [{ title: '赤裸玫瑰香水 50ml', url: 'https://example.com/product' }] : []),
       ] } })
     } })
-  assert.deepEqual(requests, [query, '阿玛尼 "赤裸玫瑰" 50ml 价格'])
+  assert.deepEqual(requests, [query, '"赤裸玫瑰" 50ml 价格'])
   assert.match(result.history, /^1\. 赤裸玫瑰香水 50ml/)
   assert.doesNotMatch(result.text, /判决书|米兰玫瑰/)
 })

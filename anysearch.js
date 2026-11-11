@@ -76,7 +76,10 @@ export async function researchWeb(input, { key = process.env.ANYSEARCH_API_KEY, 
   const normalizedOriginal = normalize(original)
   const anchors = normalize(query).split(/\s+/u).map(term => term.replace(/["“”]/gu, ''))
     .filter(term => term.length >= 2 && !commonWords.has(term) && !/^\d/u.test(term) && normalizedOriginal.includes(term))
-  const phrase = anchors.length >= 2 ? anchors.at(-1) : ''
+  const phrase = anchors.length >= 2 ? anchors.reduce((best, term) => term.length >= best.length ? term : best) : ''
+  const pricing = /价格|最低价|报价/u.test(original)
+  const specifications = pricing ? searchTerms(original).filter(term => /^\d/u.test(term)) : []
+  const productLookup = Boolean(phrase && specifications.some(term => /\d[a-z]+$/iu.test(term)))
   const signal = AbortSignal.timeout(20000)
   const fetchCards = async query => {
     const response = await fetcher(`${API}/${url ? 'extract' : 'search'}`, {
@@ -109,9 +112,9 @@ export async function researchWeb(input, { key = process.env.ANYSEARCH_API_KEY, 
     if (original && (!cards.length || !foundPhrase)) {
       let retry = original
       if (phrase) {
-        const specifications = searchTerms(original).filter(term => /^\d/u.test(term))
-        const terms = [...anchors.slice(0, -1), `"${phrase}"`, ...specifications]
-        if (/价格|最低价|报价/u.test(original)) terms.push('价格')
+        const context = productLookup ? [] : anchors.filter(term => term !== phrase)
+        const terms = [...context, `"${phrase}"`, ...searchTerms(original).filter(term => /^\d/u.test(term))]
+        if (pricing) terms.push('价格')
         retry = [...new Set(terms)].join(' ')
       }
       if (normalize(retry) !== normalize(query)) {
@@ -122,7 +125,7 @@ export async function researchWeb(input, { key = process.env.ANYSEARCH_API_KEY, 
         cards = rankSearchCards([...more, ...cards], query, original, phrase)
       }
     }
-    if (phrase && cards.some(matchesPhrase)) cards = cards.filter(matchesPhrase)
+    if (productLookup || (phrase && cards.some(matchesPhrase))) cards = cards.filter(matchesPhrase)
   }
   const distinct = new Map()
   for (const card of cards) {
