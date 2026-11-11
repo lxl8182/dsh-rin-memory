@@ -43,10 +43,9 @@ export const MAIN_SESSION_TOOLS = Object.freeze([])
  * 主会话人格之后追加的「魔法」段。
  *
  * 只讲咒语怎么写、写完要等反馈,不讲"工具"两个字——那是函数调用语境的触发器。
- * 只有学习或忘掉咒语时更新正文，不含时间、版本或每轮数据。
+ * 正文不含时间、版本或每轮数据。
  */
 export const MAGIC_SECTION = 'rin-memory:magic'
-const RECALL_RULE = '<翻本子>想找的事</翻本子>'
 const RESEARCH_RULE = '<查资料>查询词或完整网址</查资料> —— 这句确实需要公开资料时我才查，比如对方让我找资料、问当前价格或近期消息、请我看一个网页。打招呼、闲聊和聊我们的经历，我用眼前的对话和回忆自然回应。查时保留对方说的名称和规格，查近况用今天的年月。'
 const CAST_RULE = '有事要实际动手时，我单独写一行，从开标签写到闭标签。等【终端反馈】回来，我再告诉对方结果。'
 
@@ -56,22 +55,7 @@ const BASE_MAGIC_RULES = [
   CAST_RULE,
   '1. 读文件:<读取>本地路径</读取>',
   '2. 执行:<执行>具体操作</执行>',
-  '3. ' + RECALL_RULE + ' —— 我先用本轮自然想起的事。主人明确问到以前的事、手边又缺具体记录时，我才查一次。拿到反馈就接着回答。',
-  '4. 改写:<改写>旧内容 ||| 正确内容</改写> —— 主人纠正我的记忆时用',
-  '5. 撕掉:<撕掉>要忘掉的事</撕掉> —— 主人想让我忘掉一件事时用',
-  // 和 3/4/5 完全同格式的一条,说明只讲"什么情况下用":这条的正文不进任何地方,
-  // 程序只把主人刚说的那句交出去。所以这里一个实现细节都不写(实测见下)。
-  '6. 学到:<学到>主人希望以后一直这样做的事</学到> —— 主人教我以后怎么说话或相处时用',
-  // 元咒语只留语法,不写解释。实测(2026-10-26,每版各两轮 48 次):
-  //   只留语法 69%/69% ｜ 语法+一句主动性 63% ｜ 短自然语言 42% ｜
-  //   长自然语言 54% ｜ 原规格腔 60%/50%
-  // 每多一句解释,模型就多一分把整段当接口文档读的倾向,思考跟着退回技术腔。
-  //
-  // 唯一的例外是"学成学败程序会回话"这半句:学咒语是异步的(慢活派给工作
-  // 会话,几分钟到十几分钟),不写清楚模型等不到结果就会自己宣布「学会了」。
-  // 这不是推测 —— 2026-10-26 实测到过它编造「终端反馈:咒语【报时】学会啦」。
-  '7. 学咒语:<学咒语>名字 ||| 说明</学咒语> —— 我等消息回来再说学得怎么样。',
-  '8. 忘掉咒语:<忘掉咒语>名字</忘掉咒语>',
+  '3. 学到:<学到>主人希望以后一直这样做的事</学到> —— 主人明确教我以后都怎么说话或相处时用。',
 ].join('\n')
 
 const CONTACT_RULES = [
@@ -88,26 +72,22 @@ const CONTACT_RULES = [
  * 当前模型的边界,改措辞和调 effort 都压不住(两者都试过)。
  *
  * 位置比措辞敏感:必须始终是魔法段的**最后一行**。所以它不放进
- * BASE_MAGIC_RULES,而是由 magicText 在学到的咒语之后补上。
+ * BASE_MAGIC_RULES,而是由 magicText 在咒语说明之后补上。
  */
 const THINKING_VOICE = '我用第一人称想事情，就像平时自言自语一样。'
 
-export function magicText({ learned = [], research = false } = {}) {
-  const lookup = research ? '\n9. ' + RESEARCH_RULE : ''
-  const learnedText = learned.length
-    ? `\n【自己学会的】\n${learned.map(spell => `· ${spell.name} —— ${spell.note}`).join('\n')}\n<咒语名字>正文</咒语名字>`
-    : ''
-  return `${BASE_MAGIC_RULES}${lookup}${learnedText}\n\n${CONTACT_RULES}\n${THINKING_VOICE}`
+export function magicText({ research = false } = {}) {
+  const lookup = research ? '\n4. ' + RESEARCH_RULE : ''
+  return `${BASE_MAGIC_RULES}${lookup}
+
+${CONTACT_RULES}
+${THINKING_VOICE}`
 }
 
 export const MAGIC_RULES = magicText()
 
-function readOnlyMagic({ research, recall } = {}) {
-  const rules = [
-    research ? RESEARCH_RULE : '',
-    recall ? RECALL_RULE + ' —— 对方明确问起我记不记得以前聊过的事时，用话题关键词查；泛问时写「最近记忆」。' : '',
-  ].filter(Boolean)
-  return rules.length ? ['【我的咒语】', CAST_RULE, ...rules, THINKING_VOICE].join('\n') : THINKING_VOICE
+function readOnlyMagic({ research } = {}) {
+  return research ? ['【我的咒语】', CAST_RULE, RESEARCH_RULE, THINKING_VOICE].join('\n') : THINKING_VOICE
 }
 
 function awarenessText(awareness) {
@@ -183,13 +163,12 @@ export class MainSessionScope {
    * @param {object} [options.logger]
    * @param {boolean} [options.chatOnly] 使用公开聊天人设和工具隔离。
    */
-  constructor(agent, { currentPersona, currentAwareness = () => '', learned = () => [], research = () => false,
+  constructor(agent, { currentPersona, currentAwareness = () => '', research = () => false,
     readOnlySpells = () => undefined, currentDate = () => '', proactive = () => false, chatOnly = false,
     managedCompaction = !chatOnly, logger = console } = {}) {
     this.agent = agent
     this.currentPersona = currentPersona ?? (() => '')
     this.currentAwareness = currentAwareness
-    this.learned = learned
     this.research = research
     this.proactive = proactive
     this.readOnlySpells = readOnlySpells
@@ -332,7 +311,7 @@ export class MainSessionScope {
         text: `这轮我用本轮带来的回忆和候选直接写想发出的消息，或者写 [PASS]。我只聊天，回忆和资料已由程序准备好。\n${THINKING_VOICE}` })
     } else {
       sections.push({ name: this.chatOnly ? 'rin-memory:chat' : MAGIC_SECTION,
-        text: this.chatOnly ? readOnlyMagic(this.readOnlySpells()) : magicText({ learned: this.learned(), research: this.research() }), interpolate: false })
+        text: this.chatOnly ? readOnlyMagic(this.readOnlySpells()) : magicText({ research: this.research() }), interpolate: false })
     }
     // tools 恒为空:不是"过滤",而是明确不报送任何 schema——见 MAIN_SESSION_TOOLS
     // 上方的实测说明。少了这个字段,thinking 才留在角色里。

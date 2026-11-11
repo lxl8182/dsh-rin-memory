@@ -266,26 +266,23 @@ test('MEMORY_RULES describes lasting teaching and current-turn requests in first
   assert.ok(!/pub-7|\d{4}-\d{2}-\d{2}/.test(MEMORY_RULES))
 })
 
-test('the magic section tells the model 学到 exists, in the same shape as its neighbours', async () => {
+test('the owner magic section advertises only the four current spells', async () => {
   const { magicText } = await import('../main-session.js')
-  const text = magicText()
+  const text = magicText({ research: true })
   assert.match(text, /我用第一人称想事情/)
   assert.doesNotMatch(text, /不要|不再|不把|不能|禁止|不得|不是|不准|不用/)
   assert.match(text, /<学到>/, 'the model must know the spell exists, or it is unreachable')
-  // 格式与 3/4/5 完全一致:序号. 名字:<名字>参数</名字> —— 一句话说明。
   const line = text.split('\n').find(row => row.includes('<学到>'))
   assert.match(line, /^\d+\. 学到:<学到>.+<\/学到> —— .+/, 'same one-line shape as the neighbours')
   // 说明只讲"什么情况下用",不讲实现(实测:多一句解释就会退回技术腔)。
   for (const banned of ['持久', '规则', '人格卡', '服务', 'source_key', '接口']) {
     assert.ok(!line.includes(banned), 'the 学到 line must not explain ' + banned)
   }
-  // 元咒语说明原样保留(「学成学败程序会回话」是实测救回来的)。
-  assert.match(text, /我等消息回来再说学得怎么样/)
-  assert.match(text, /7\. 学咒语:/)
-  assert.match(text, /8\. 忘掉咒语:/)
+  assert.deepEqual([...text.matchAll(/<([\p{Script=Han}]+)>[^<]+<\/\1>/gu)].map(match => match[1]),
+    ['读取', '执行', '学到', '查资料', '下次联系'])
   // 序号仍是 1..N 连续,顺序即协议顺序。
   const numbers = [...text.matchAll(/^(\d+)\. /gm)].map(match => Number(match[1]))
-  assert.deepEqual(numbers, [1, 2, 3, 4, 5, 6, 7, 8])
+  assert.deepEqual(numbers, [1, 2, 3, 4])
 })
 test('the main session still reports no tools after adding the spell route', async () => {
   // 咒语走正文解析,不经工具注册表:这是主会话 0 tools 不被破坏的直接证据。

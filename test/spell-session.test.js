@@ -77,6 +77,7 @@ test('QQ friend chat uses the local date and resolves a labeled lookup with tool
   assert.deepEqual(first.tools, [])
   assert.match(first.sections.find(row => row.name === 'rin-memory:date').text, /2026-11-10/)
   assert.match(first.sections.find(row => row.name === 'rin-memory:chat').text, /<查资料>/)
+  assert.doesNotMatch(JSON.stringify(first.sections), /翻本子|学到|执行/)
   now = '2026-11-10T04:00:00Z'
   assert.deepEqual((await scope.shapeAssembly({}, next)).sections, first.sections)
   const query = '2026 年 11 月 软件工程 招聘'
@@ -151,6 +152,18 @@ test('an active proactive draft gets a chat prompt and never executes a spell', 
   await f.runtime.spellRunner.dispose()
 })
 
+test('retired and previously learned tags do not wake a QQ chat or touch memory', async () => {
+  const f = fixture(), agent = f.agent('qq-owner')
+  f.runtime.observeAgent(agent)
+  f.runtime.client.request = async () => assert.fail('a retired spell reached the service')
+  f.emit(agent, ['<翻本子>游戏</翻本子>', '<改写>旧 ||| 新</改写>', '<撕掉>旧</撕掉>',
+    '<学咒语>旧招 ||| 执行</学咒语>', '<忘掉咒语>旧招</忘掉咒语>', '<旧招>测试</旧招>'].join('\n'), 1)
+  await f.runtime.spellRunner.tail
+  assert.deepEqual(f.feedback, [])
+  assert.deepEqual(f.workers, [])
+  await f.runtime.spellRunner.dispose()
+})
+
 test('a desktop QQ preset executes and follows up with no bridge or QQ binding', async () => {
   const f = fixture(), main = f.agent('desktop-local')
   f.runtime.observeAgent(main)
@@ -199,7 +212,7 @@ test('bridge ownership only gates QQ and personal memory, never standalone gener
   f.runtime.observeAgent(main)
   f.emit(main, '<翻本子>私人内容</翻本子>', 1)
   await f.runtime.spellRunner.tail
-  assert.match(f.feedback[0].content[0].text, /失败：这个会话没有个人记忆权限/)
+  assert.deepEqual(f.feedback, [])
   f.runtime.bridge = { binding: id => id === 'qq-stranger' ? { owner: false, scope: 'private' } : undefined }
   const remote = f.agent('qq-stranger')
   f.runtime.observeAgent(remote)

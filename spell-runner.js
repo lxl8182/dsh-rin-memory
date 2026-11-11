@@ -118,9 +118,9 @@ export async function startWorker(ctx, { prompt, provider, model, cwd, timeoutMs
 /** 同一 session/seq 去重；所有消息共用串行队列，整批结束后一次回填。 */
 export class SpellRunner {
   constructor({ runSpell, followupOf = agent => message => agent.followup(message), isActive = () => true,
-    learnedNames = () => [], logger = console, now = Date.now, maxAgeMs = 1800000,
+    learnedNames = () => [], enabledSpells, logger = console, now = Date.now, maxAgeMs = 1800000,
     onAbandoned = () => {} }) {
-    Object.assign(this, { runSpell, followupOf, isActive, learnedNames, logger, now, maxAgeMs, onAbandoned })
+    Object.assign(this, { runSpell, followupOf, isActive, learnedNames, enabledSpells, logger, now, maxAgeMs, onAbandoned })
     this.seen = new Map()
     this.jobs = new Map()
     this.tail = Promise.resolve()
@@ -139,9 +139,10 @@ export class SpellRunner {
     const bridgeHandlesRecall = bridgeLookup && source?.qqLookup === true
       && parsed.casts.length === 1 && !parsed.unknown.length
     const casts = parsed.casts.filter(cast => cast.spell !== RESEARCH_SPELL
+      && (!this.enabledSpells || this.enabledSpells.has(cast.spell))
       && (cast.spell !== '翻本子' || (cast === firstRecall && !source?.recalled && !bridgeHandlesRecall)))
     // 念了还没学会的名字:不执行,但必须回话。静默等于告诉模型"成功了"。
-    const unknown = parsed.unknown.map(cast => ({
+    const unknown = (this.enabledSpells ? [] : parsed.unknown).map(cast => ({
       cast, ok: false,
       text: `「${cast.spell}」还没学成。念它什么也不会发生,先别用它。`,
     }))

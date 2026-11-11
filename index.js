@@ -22,7 +22,7 @@ import { ProactiveRuntime, PROACTIVE_SOURCE } from './proactive.js'
 import { localClock } from './contact.js'
 import {
   IMAGE_TOKENS, OUTPUT_HEADROOM, SEGMENT_DEFAULTS, SegmentStore, deleteSessionDirectory,
-  estimateMessages, estimateTokens, listSessionDirectories, renderCarry, selectCarry,
+  estimateMessages, estimateTokens, exchangeTokens, listSessionDirectories, renderCarry, selectCarry,
 } from './session-store.js'
 import { MAGIC_RULES, MATERIAL_NOTE, MainSessionScope } from './main-session.js'
 import { readSpell, spellToGoal } from './magic-tools.js'
@@ -31,7 +31,6 @@ import { researchWeb } from './anysearch.js'
 import { TaskStore } from './task-store.js'
 import { createTaskTools } from './task-tools.js'
 import { SpellRunner, SPELL_SOURCE, startWorker } from './spell-runner.js'
-import { SpellLibrary, META_SPELLS, parseSolved } from './spell-library.js'
 
 export const name = 'dsh-rin-memory'
 export const inject = ['systemPrompt', 'profileContext']
@@ -73,8 +72,14 @@ const SEGMENT_SOURCE = 'segment-carry'
 
 /** 带入历史前的一句来源说明。只说明「这不是新发言」,不复述内容。 */
 const SEGMENT_CARRY_NOTE = '以下是先前聊过的原话，保留当时的说话者和顺序。'
+const SEGMENT_CARRY_OVERHEAD = estimateTokens(SEGMENT_CARRY_NOTE) + 32
 const SEGMENT_RESUME = /昨天|昨晚|前天|上次|上回|之前|先前|还记得|接着|继续|原话|yesterday|last time|continue|pick up|(?:呢|怎么样了|了吗)[？?。！!\s]*$/i
 const RECENT_CARRY_TURNS = 5
+
+function carryTokenCost(carry) {
+  const exchanges = carry?.exchanges ?? []
+  return exchanges.length ? SEGMENT_CARRY_OVERHEAD + exchanges.reduce((sum, exchange) => sum + exchangeTokens(exchange), 0) : 0
+}
 
 /**
  * 宿主的人格槽位名。
@@ -254,7 +259,6 @@ class MemoryRuntime {
     // 最近一次真正处理过轮次的 agent:咒语派活时用它确定归属会话。
     this.currentAgent = null
     // 正在学、还没学完的咒语,按会话记着;会话销毁时一并作废。
-    this.pendingLearnings = new Map()
     // 工作会话的落脚目录:和插件数据放在一起,不占用 QQ 聊天的 cwd。
     this.workspaceDirectory = join(dirname(this.statusPath), 'workspace')
     // 上下文分段(RO02-CTX):状态与清理状态放在同一个插件数据目录,因为它记的
@@ -265,11 +269,10 @@ class MemoryRuntime {
       logger,
     })
     // 新段第一次请求要带进去的旧话,按 QQ 来源键暂存到真正用掉为止。
-    this.spellLibrary = new SpellLibrary({ statePath: join(dirname(this.statusPath), 'spells.json') })
     this.spellRunner = new SpellRunner({
       logger,
       runSpell: (cast, agent, signal) => this.runSpell(cast, agent, signal),
-      learnedNames: () => [...META_SPELLS, ...this.spellLibrary.list().map(spell => spell.name)],
+      enabledSpells: new Set(['读取', '执行', '学到']),
       isActive: agent => !this.stopped && this.spellScopes.has(agent) && this.isSpellSession(agent)
         && !this.client.isRetired(agent.session.id),
       // 主会话已经走开(超时/销毁)时,结果不能就这么没了:改成主动发到 QQ。
@@ -285,7 +288,6 @@ class MemoryRuntime {
     await this.probe().catch(() => {})
     // 段状态必须先于任何一轮打开:换过段却没恢复,下一轮会再换一次、连丢两段。
     await this.segments.open()
-    await this.spellLibrary.open()
     // 工作会话的目录要先存在,否则 agents.create 拿不到有效 cwd。
     await mkdir(this.workspaceDirectory, { recursive: true }).catch(error => {
       this.logger.warn?.(`[dsh-rin-memory] 工作目录创建失败：${error.message}`)
@@ -356,79 +358,20 @@ class MemoryRuntime {
     }))
   }
 
-  /**
-   * 六个咒语的真正实现。
-   *
-   * 前三个动外面的世界:<读取> 直接读盘(单人自用,不做白名单);<生成>/<执行>
-   * 一律派给独立的后台工作会话——不在 QQ 主会话进程里起 shell,写错也炸不到
-   * 聊天本身。companion_task 仍使用自己的 TaskStore 与原生子会话。
-   *
-   * 后三个动记忆本:<翻本子>/<改写>/<撕掉> 直接调核心服务。这三条不能省——
-   * 注入与召回是程序自动做的,但"你记错了""忘掉这个"必须由模型当场发起,
-   * 否则它只能口头答应,服务里的条目一条没动。
-   */
-  spellHandlers(agent = this.currentAgent, signal) {
+  spellHandlers(agent, signal) {
     return {
-      读取: async body => await readSpell(body, { cwd: agent?.session.header?.cwd ?? process.cwd() }),
-      执行: async body => await this.dispatchSpellTask('执行', body, agent, signal),
-      翻本子: async body => await this.spellRecall(body, agent),
-      改写: async body => await this.spellCorrect(body, agent),
-      撕掉: async body => await this.spellForget(body, agent),
-      学到: async body => await this.spellTeach(body, agent),
+      读取: body => readSpell(body, { cwd: agent.session.header?.cwd ?? process.cwd() }),
+      执行: body => this.dispatchSpellTask('执行', body, agent, signal),
+      学到: body => this.spellTeach(body, agent),
     }
   }
 
   async runSpell(cast, agent, signal) {
     if (!this.spellScopes.has(agent) || !this.isSpellSession(agent)) throw new Error('当前会话没有接入咒语执行器。')
     if (this.client.isRetired(agent.session.id)) throw new Error('原会话已清理，等新会话。')
-    const execute = expanded => this.spellHandlers(agent, signal)[expanded.spell](expanded.body)
-    // 学咒语是异步的:先做能立刻判定的校验立刻回话,慢的那半边(装东西、写脚本、
-    // 反复试)交给工作会话在后台跑,跑完再补一条结果。同步等会逼模型自己编
-    // 「终端反馈」—— 实测发生过。
-    if (cast.spell === '学咒语') return this.startLearning(cast.body, execute, agent, signal)
-    if (cast.spell === '忘掉咒语') return this.spellLibrary.forget(cast.body)
-    return execute(this.spellLibrary.expand(cast))
-  }
-
-  /**
-   * 异步学咒语:先回一句"记下了",慢活交给后台。
-   *
-   * 为什么要拆:学一项新本事常要装包、写脚本、反复试,几分钟到十几分钟。
-   * 让主会话同步等,模型看不到反馈就会自己编「终端反馈:学会啦」——已实测
-   * 出现过。所以这里只做立刻能判定的事(名字、重名、上限),其余放到后台,
-   * 完成后再用 followup 补一条新消息。
-   */
-  async startLearning(body, execute, agent, signal) {
-    const spell = this.spellLibrary.check(body)
-    const sessionId = agent.session.id
-    const learning = this.spellLibrary.finish(spell, execute, signal,
-      (wanted, trialError) => this.workOutSpell(wanted, trialError, agent, signal))
-    this.pendingLearnings.set(sessionId, learning)
-    learning
-      .then(result => this.reportLearning(agent, result))
-      .catch(error => this.reportLearning(agent, null, error))
-      .finally(() => {
-        if (this.pendingLearnings.get(sessionId) === learning) this.pendingLearnings.delete(sessionId)
-      })
-    return `记下了,「${spell.name}」这就去学。${spell.note ? `要它做到的是:${spell.note}。` : ""}学好了再跟你说一声。`
-  }
-
-  /** 学成或学败,都以一条有来源标记的外部事件补回主会话。 */
-  async reportLearning(agent, result, error) {
-    const text = error
-      ? `【终端反馈·学咒语】没学成:${error.message ?? error}`
-      : `【终端反馈·学咒语】${result}`
-    this.logger.info?.("[dsh-rin-memory] " + text)
-    try {
-      if (this.spellScopes.has(agent) && this.isSpellSession(agent)) {
-        agent.followup({ id: `learn:${randomUUID()}`, role: "user",
-          source: { kind: SPELL_SOURCE }, content: [{ type: "text", text }] })
-        return
-      }
-    } catch (cause) {
-      this.logger.warn?.("[dsh-rin-memory] 学咒语回填失败:" + (cause?.message ?? cause))
-    }
-    await this.proactive.offerTaskResult(agent.session.id, text)
+    const handle = this.spellHandlers(agent, signal)[cast.spell]
+    if (!handle) throw new Error('这条咒语已停用。')
+    return handle(cast.body)
   }
 
   /**
@@ -443,37 +386,6 @@ class MemoryRuntime {
     if (!this.isTrusted(agent)) throw new Error('这个会话没有个人记忆权限。')
     if (this.client.isRetired(sessionId)) throw new Error('原会话已清理,等新会话。')
     return sessionId
-  }
-
-  /** <翻本子>:列出服务里记着的条目,只读。 */
-  async spellRecall(body, agent) {
-    const sessionId = agent?.session?.id
-    const subject = sessionId && this.memorySubject(sessionId)
-    if (!subject) throw new Error('这个会话没有个人记忆权限。')
-    if (this.client.isRetired(sessionId)) throw new Error('原会话已清理，等新会话。')
-    const query = String(body ?? '').trim()
-    const result = await this.client.entries(query === '最近记忆' ? '' : query, subject)
-    const items = (result.items ?? []).slice(0, 20)
-    if (items.length === 0) return '本子上还没写什么。'
-    return items.map(row => {
-      const kind = row.type === 'reflection' ? '想法' : '事'
-      return `[${kind}] ${String(row.text ?? '').trim()}${row.id ? ` (${row.id})` : ''}`
-    }).join('\n')
-  }
-
-  /** <改写>旧 ||| 新:真的把服务里那条改过来。 */
-  async spellCorrect(body, agent) {
-    const sessionId = this.spellSession(agent)
-    const parts = String(body ?? '').split('|||')
-    if (parts.length < 2) throw new Error('要写成"旧内容 ||| 正确内容"。')
-    const oldText = parts[0].trim()
-    const newText = parts.slice(1).join('|||').trim()
-    if (!oldText || !newText) throw new Error('旧内容和新内容都要写。')
-    const requestId = `corr_${stableHash(`${sessionId}:${oldText}:${newText}`)}`
-    const receipt = await this.client.correct({ old_text: oldText, new_text: newText, request_id: requestId })
-    return receipt.applied
-      ? `已经改过来了。${receipt.invalidated_fact_ids?.length ? `顺带作废了 ${receipt.invalidated_fact_ids.length} 条旧记录。` : ''}`
-      : `没改成(${receipt.status ?? '未知原因'})。`
   }
 
   /**
@@ -607,24 +519,6 @@ class MemoryRuntime {
     return `没学成：${error?.message ?? '未知原因'}`
   }
 
-  /** <撕掉>:真的删,不是嘴上答应。匹配到多条就退回候选,不自己挑。 */
-  async spellForget(body, agent) {
-    this.spellSession(agent)
-    const text = String(body ?? '').trim()
-    if (!text) throw new Error('要忘掉的是哪件事?')
-    try {
-      const receipt = await this.client.forget({ text })
-      return `已经撕掉了(${receipt.deletion_id ?? '已删除'})。`
-    } catch (error) {
-      if (error.code === 'ambiguous_target') {
-        const rows = (error.extra?.candidates ?? []).slice(0, 5)
-        return `本子上有好几条都像,是哪一条?\n${rows.map(r => `- ${r.text} (${r.id})`).join('\n')}`
-      }
-      if (error.code === 'not_found') return '本子上没找到这件事。'
-      throw error
-    }
-  }
-
   /**
    * 咒语派给无 preset 的标准 agent；等真实结果后由 SpellRunner 回填。
    */
@@ -648,37 +542,6 @@ class MemoryRuntime {
   async pushSpellResults(agent, results) {
     const text = results.map(result => renderFeedback(result.cast, result)).join('\n\n')
     await this.proactive.offerTaskResult(agent.session.id, text)
-  }
-
-  /**
-   * 让工作会话把一项本事做到能跑,并回报一条可直接存成咒语的做法。
-   *
-   * 主会话里模型不知道 TTS 要装什么、B 站数据怎么取,让它猜模板是瞎猜;
-   * 工作会话有全套工具,能查、能装、能反复试。这里只负责把要求说清楚,
-   * 并规定它必须把结论写成一行 —— 解析只认那一行,不认它的叙述。
-   */
-  async workOutSpell({ name, note }, trialError, agent, signal) {
-    const route = agent.session.requestHeader?.()?.config ?? agent.options
-    const text = await startWorker(this.ctx, {
-      prompt: [
-        `主人想让你学会一项本事,以后用一个咒语就能重复用。名字叫「${name}」${note ? `,用途是:${note}` : ''}。`,
-        trialError ? `先前试过一版没跑通:${trialError.message}。` : '',
-        '在这台机器上真的把它做通:需要装什么就装,需要写脚本就写,反复试到确实能跑为止。',
-        '做完之后在最后单独写一行,格式严格如下(一行,用 ||| 分隔):',
-        '【咒语】执行 ||| 能重复运行的那条命令,把"每次会变的那段"写成 {body}',
-        '或者',
-        '【咒语】读取 ||| 要读的路径,把"每次会变的那段"写成 {body}',
-        '如果这件事根本没法做成一条固定命令,就写:【咒语】做不成 和一句原因。',
-        '不要修改主插件源码目录 ' + resolve(import.meta.dirname) + '。',
-      ].filter(Boolean).join('\n'),
-      provider: route?.provider, model: route?.model,
-      cwd: this.workspaceDirectory, signal,
-    })
-    if (/【咒语】\s*做不成/.test(text)) {
-      const reason = text.slice(text.indexOf('【咒语】') + 5).replace(/^\s*做不成\s*/, '').split('\n')[0].trim()
-      throw new Error(`工作会话判断这件事做不成${reason ? `：${reason}` : ''}。`)
-    }
-    return parseSolved(text)
   }
 
   /**
@@ -727,7 +590,6 @@ class MemoryRuntime {
     this.proactive.stop()
     this.stopped = true
     for (const run of this.proactive.active.values()) run.finishOutput?.()
-    this.pendingLearnings.clear()
     await this.spellRunner.dispose()
     await this.bridgeSubscription?.dispose?.()
     this.bridgeSubscription = null
@@ -1252,7 +1114,6 @@ class MemoryRuntime {
           return context.persona
         },
         currentAwareness: () => this.awareness.get(sessionId),
-        learned: () => this.spellLibrary.list(),
         research: () => Boolean(this.bridge?.resolveResearch && this.isTrusted(agent) && process.env.ANYSEARCH_API_KEY?.trim()),
         currentDate: () => this.privateChatDate(sessionId),
         proactive: () => this.proactive.active.has(sessionId),
@@ -1267,7 +1128,6 @@ class MemoryRuntime {
   detachSpells(agent) {
     this.spellRunner.detach(agent)
     // 会话没了,还没学完的那条也没处报了;结果已由 startLearning 自己推 QQ。
-    this.pendingLearnings.delete(agent?.session?.id)
     const entry = this.spellScopes.get(agent)
     this.spellScopes.delete(agent)
     entry?.dispose?.()
@@ -1403,8 +1263,6 @@ class MemoryRuntime {
           managedCompaction: input.scope === 'group',
           readOnlySpells: input.scope === 'private' ? () => ({
             research: Boolean(this.bridge?.resolveResearch && process.env.ANYSEARCH_API_KEY?.trim()),
-            recall: this.memoryEnabled !== false && this.bridge?.canContact?.(agent.session.id)
-              && Boolean(this.memorySubject(agent.session.id)),
           }) : undefined,
           currentDate: () => this.privateChatDate(agent.session.id),
           proactive: () => this.proactive.active.has(agent.session.id),
@@ -1526,7 +1384,8 @@ class MemoryRuntime {
       const surface = agent.session.deriveMessages?.() ?? []
       const persona = this.personas.get(sessionId) || this.chatScopes.get(agent)?.lastPersona
       const space = this.segmentSpace(agent, messages, persona, prepared.segmentLimits)
-      if (space <= estimateTokens(prepared.background) + 4) {
+      const carry = prepared.segmentCarry
+      if (space <= estimateTokens(prepared.background) + 4 + carryTokenCost(carry)) {
         if (prepared.requiredBackground) {
           const required = await prepared.requiredBackground()
           prepared.background = required.text
@@ -1537,13 +1396,12 @@ class MemoryRuntime {
           throw new Error('本轮输入与必需上下文超出模型预算，请缩短文字或减少图片后重试。')
         }
       }
-      const carry = prepared.segmentCarry
       if (carry && record?.segment_id === carry.segmentId && !record.handoff?.adopted) {
         const id = `segment-carry:${carry.segmentId}`
         const available = new Set(record.handoff.exchanges.map(item => item.source_key))
         const exchanges = selectCarry({ exchanges: carry.exchanges.filter(item => available.has(item.source_key)) }, {
           carryTurns: this.segments.limits.carryTurns,
-          carryTokens: Math.max(0, space - estimateTokens(prepared.background) - estimateTokens(SEGMENT_CARRY_NOTE) - 32),
+          carryTokens: Math.max(0, space - estimateTokens(prepared.background) - SEGMENT_CARRY_OVERHEAD),
         }, carry.anchors).exchanges
         const sources = exchanges.map(item => item.source_key)
         if (exchanges.length && !surface.some(message => message.id === id)) {
@@ -1584,7 +1442,9 @@ class MemoryRuntime {
     }
     const inputIndex = messages.findLastIndex(message =>
       message.source?.kind === 'user' || message.source?.kind === PROACTIVE_SOURCE)
-    messages.splice(inputIndex < 0 ? 0 : inputIndex, 0, material)
+    const carryIndex = prepared.segmentCarry
+      ? messages.findIndex(message => message.id === `segment-carry:${prepared.segmentCarry.segmentId}`) : -1
+    messages.splice(carryIndex >= 0 ? carryIndex : Math.max(0, inputIndex), 0, material)
     return { ...decision, messages }
   }
 
@@ -1713,12 +1573,12 @@ class MemoryRuntime {
         const space = this.segmentSpace(agent, payload.messages, persona, segmentLimits)
         if (selectionVersion) {
           requiredBackground = () => this.renderBackground(sessionId, context, agent, input.text, 0)
-          if (estimateTokens(background.text) + 4 >= space) background = await requiredBackground()
+          if (estimateTokens(background.text) + 4 + carryTokenCost(segmentCarry) >= space) background = await requiredBackground()
         }
         if (segmentCarry) {
           segmentCarry.exchanges = selectCarry(segmentCarry, {
             carryTurns: this.segments.limits.carryTurns,
-            carryTokens: Math.max(0, space - estimateTokens(background.text) - estimateTokens(SEGMENT_CARRY_NOTE) - 32),
+            carryTokens: Math.max(0, space - estimateTokens(background.text) - SEGMENT_CARRY_OVERHEAD),
           }, segmentCarry.anchors).exchanges
         }
       }
@@ -1891,8 +1751,7 @@ class MemoryRuntime {
       if (this.proactive.active.has(agent.session.id)) return
       if (!this.isSpellSession(agent)) return
       if (this.researchTurns.has(agent) && this.researchTurns.get(agent) === event.data.turn) return
-      const bridgeLookup = this.bridge?.binding(agent.session.id)?.scope === 'private' && Boolean(this.bridge?.resolveResearch)
-      void this.spellRunner.handleAssistantMessage(agent, event.data.message, event.seq, { bridgeLookup })
+      void this.spellRunner.handleAssistantMessage(agent, event.data.message, event.seq)
         .catch(error => this.logger.warn?.(`[dsh-rin-memory] 咒语处理失败：${error.message}`))
       return
     }
@@ -2002,15 +1861,8 @@ class MemoryRuntime {
       || (!this.spellScopes.has(agent) && !this.chatScopes.has(agent))) return
     const { casts, unknown } = parseSpells(text)
     const [cast] = casts
-    if (unknown.length || casts.length !== 1 || ![RESEARCH_SPELL, '翻本子'].includes(cast.spell)) return
+    if (unknown.length || casts.length !== 1 || cast.spell !== RESEARCH_SPELL) return
     try {
-      if (cast.spell === '翻本子') {
-        if (this.memoryEnabled === false || (!binding.owner && !this.bridge.canContact?.(sessionId))) {
-          throw new Error('这个会话没有个人记忆权限。')
-        }
-        const memory = await this.spellRecall(cast.body, agent)
-        return { history: '', text: `${renderFeedback(cast, { text: memory })}\n我用记得的内容自然回应原来的问题。` }
-      }
       const question = String(binding.input ?? '').trim()
       const { text: sources, history } = await researchWeb(cast.body, { question })
       return { history, text: `${renderFeedback(cast, { text: sources })}\n【原问题】${JSON.stringify(question)}\n`

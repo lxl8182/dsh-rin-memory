@@ -644,6 +644,7 @@ test('新段第一次请求只带允许的东西:没有原生压缩摘要、没�
   const kinds = decision.messages.map(message => message.source?.kind ?? '')
   // 带入的旧话有自己的来源标记:既不是主人这次说的话,也不是记忆资料。
   assert.ok(kinds.includes('segment-carry'), 'carried history must be marked: ' + kinds.join(','))
+  assert.equal(kinds.at(-2), 'segment-carry', 'the prior dialogue is adjacent to the current input')
   // 主人这一次的原话仍然存在,并且是最后一条——带入不能顶替或盖住它。
   const last = decision.messages.at(-1)
   assert.equal(last.source?.kind, 'user')
