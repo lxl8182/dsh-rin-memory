@@ -34,6 +34,22 @@ test('AnySearch error bodies stay out of spell feedback', async () => {
     new Response('private upstream details', { status: 402 }) }), { message: 'AnySearch 额度不足（HTTP 402）。' })
 })
 
+test('unrelated search results retry once with the original question before returning sources', async () => {
+  const requests = []
+  const question = '帮我查赤裸玫瑰香水 50ml 的最低价格'
+  const result = await researchWeb('阿玛尼 高定私藏 赤裸玫瑰', { key: 'mock-key', question,
+    fetcher: async (_url, init) => {
+      requests.push(JSON.parse(init.body).query)
+      return Response.json({ code: 0, data: { results: [
+        { title: '刑事判决书', url: 'https://example.com/judgment' },
+        ...(requests.length === 2 ? [{ title: '赤裸玫瑰香水 50ml', url: 'https://example.com/product' }] : []),
+      ] } })
+    } })
+  assert.deepEqual(requests, ['阿玛尼 高定私藏 赤裸玫瑰', question])
+  assert.match(result.history, /赤裸玫瑰香水 50ml/)
+  assert.doesNotMatch(result.text, /判决书/)
+})
+
 test('spells are lifted out of the visible text, never shown to the owner', () => {
   const parsed = parseSpells('小铃去看看。\n\n<执行>df -h</执行>')
   assert.equal(parsed.visible, '小铃去看看。')

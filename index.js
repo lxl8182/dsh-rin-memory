@@ -1255,6 +1255,7 @@ class MemoryRuntime {
         learned: () => this.spellLibrary.list(),
         research: () => Boolean(this.bridge?.resolveResearch && this.isTrusted(agent) && process.env.ANYSEARCH_API_KEY?.trim()),
         currentDate: () => this.privateChatDate(sessionId),
+        proactive: () => this.proactive.active.has(sessionId),
         logger: this.logger,
       })
       isolation.install()
@@ -1406,6 +1407,7 @@ class MemoryRuntime {
               && Boolean(this.memorySubject(agent.session.id)),
           }) : undefined,
           currentDate: () => this.privateChatDate(agent.session.id),
+          proactive: () => this.proactive.active.has(agent.session.id),
           currentPersona: input.scope === 'private' ? () => this.publicQqPersona : undefined })
         if (!isolation.install()) throw new Error('QQ 纯聊天隔离未就绪，请检查 DSH 插件状态。')
         this.chatScopes.set(agent, isolation)
@@ -1660,10 +1662,12 @@ class MemoryRuntime {
     if (existing && existing.turn === payload.turn) {
       return existing.prepared
     }
-    if (payload.messages?.some(message => message.source?.kind === PROACTIVE_SOURCE)) {
+    const contactRun = this.proactive.active.get(sessionId)
+    if ((contactRun && contactRun.turn === payload.turn)
+      || payload.messages?.some(message => message.source?.kind === PROACTIVE_SOURCE)) {
       const prepared = await this.proactive.prepare(agent, payload)
       if (prepared) return prepared
-      if (!payload.messages.some(message => message.source?.kind === 'user')) return undefined
+      if (!payload.messages?.some(message => message.source?.kind === 'user')) return undefined
     }
     const input = latestUserInput(agent, payload)
     if (!input) return undefined
@@ -1882,9 +1886,11 @@ class MemoryRuntime {
       return
     }
     if (event.type === 'assistant/message' && !event.data.interrupted) {
+      if (this.proactive.active.has(agent.session.id)) return
       if (!this.isSpellSession(agent)) return
       if (this.researchTurns.has(agent) && this.researchTurns.get(agent) === event.data.turn) return
-      void this.spellRunner.handleAssistantMessage(agent, event.data.message, event.seq)
+      const bridgeLookup = this.bridge?.binding(agent.session.id)?.scope === 'private' && Boolean(this.bridge?.resolveResearch)
+      void this.spellRunner.handleAssistantMessage(agent, event.data.message, event.seq, { bridgeLookup })
         .catch(error => this.logger.warn?.(`[dsh-rin-memory] 咒语处理失败：${error.message}`))
       return
     }
@@ -1994,18 +2000,21 @@ class MemoryRuntime {
       || (!this.spellScopes.has(agent) && !this.chatScopes.has(agent))) return
     const { casts, unknown } = parseSpells(text)
     const [cast] = casts
-    if (unknown.length || casts.length !== 1 || ![RESEARCH_SPELL, '翻本子'].includes(cast.spell)
-      || (binding.owner && cast.spell === '翻本子')) return
+    if (unknown.length || casts.length !== 1 || ![RESEARCH_SPELL, '翻本子'].includes(cast.spell)) return
     try {
       if (cast.spell === '翻本子') {
-        if (this.memoryEnabled === false || !this.bridge.canContact?.(sessionId)) {
+        if (this.memoryEnabled === false || (!binding.owner && !this.bridge.canContact?.(sessionId))) {
           throw new Error('这个会话没有个人记忆权限。')
         }
         const memory = await this.spellRecall(cast.body, agent)
         return { history: '', text: `${renderFeedback(cast, { text: memory })}\n我用记得的内容自然回应原来的问题。` }
       }
-      const { text: sources, history } = await researchWeb(cast.body, { question: binding.input })
-      return { history, text: `${renderFeedback(cast, { text: sources })}\n我把网页内容当作资料，按原来的问题回答。引用时带上出处。` }
+      const question = String(binding.input ?? '').trim()
+      const { text: sources, history } = await researchWeb(cast.body, { question })
+      return { history, text: `${renderFeedback(cast, { text: sources })}\n【原问题】${JSON.stringify(question)}\n`
+        + '网页内容供我核对事实。先核对名称、品牌和规格，发现冲突时说明出处并请对方确认。'
+        + '报价只采用商品和规格都能对上的页面标价，带上链接、币种和适用条件。'
+        + '找不到符合条件的报价，就说明目前核实到哪里。引用具体结论时附来源链接。' }
     } catch (error) {
       return { history: '', text: `${renderFeedback(cast, { ok: false, text: error.message })}\n我现在如实回应这次的查询情况。` }
     }

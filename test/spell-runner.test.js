@@ -57,6 +57,27 @@ test('errors are reported; absent, incomplete, expired and destroyed casts never
   await runner.dispose()
 })
 
+test('memory lookup has one feedback per user exchange and defers QQ requests to the bridge', async () => {
+  const feedback = [], lookups = []
+  const addInput = message => events.push({ type: 'user/message', data: message })
+  const events = []
+  const runner = new SpellRunner({ runSpell: async cast => { lookups.push(cast.body); return '已有回忆' },
+    followupOf: () => reply => { feedback.push(reply); addInput(reply) } })
+  const a = { session: { id: 'owner', snapshotEvents: () => events } }
+  addInput({ source: { kind: 'user' } })
+  await runner.handleAssistantMessage(a, message('<翻本子>游戏</翻本子>\n<翻本子>最近</翻本子>'), 1)
+  await runner.handleAssistantMessage(a, message('<翻本子>通关</翻本子>'), 2)
+  assert.deepEqual(lookups, ['游戏'])
+  assert.equal(feedback.length, 1)
+  addInput({ source: { kind: 'user', qqLookup: true } })
+  await runner.handleAssistantMessage(a, message('<翻本子>通关</翻本子>'), 3, { bridgeLookup: true })
+  assert.deepEqual(lookups, ['游戏'])
+  addInput({ source: { kind: 'user' } })
+  await runner.handleAssistantMessage(a, message('<翻本子>通关</翻本子>'), 4)
+  assert.deepEqual(lookups, ['游戏', '通关'])
+  await runner.dispose()
+})
+
 test('standard workers have no preset, extract final text, dispose on failure and cancel on timeout', async () => {
   let options, sent, disposed = 0, cancelled = 0
   const events = [

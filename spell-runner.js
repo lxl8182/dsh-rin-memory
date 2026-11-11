@@ -4,8 +4,9 @@ import { parseSpells, renderFeedback, RESEARCH_SPELL } from './magic.js'
 
 export const SPELL_SOURCE = 'companion-spell'
 
-export function spellMessage(text) {
-  return { id: randomUUID(), role: 'user', source: { kind: SPELL_SOURCE }, content: [{ type: 'text', text }] }
+export function spellMessage(text, { recalled = false } = {}) {
+  return { id: randomUUID(), role: 'user', source: { kind: SPELL_SOURCE, ...(recalled ? { recalled } : {}) },
+    content: [{ type: 'text', text }] }
 }
 
 export function extractFinalText(session) {
@@ -126,9 +127,19 @@ export class SpellRunner {
     this.stopped = false
   }
 
-  handleAssistantMessage(agent, message, seq) {
+  handleAssistantMessage(agent, message, seq, { bridgeLookup = false } = {}) {
     const parsed = parseSpells(messageText(message), this.learnedNames())
-    const casts = parsed.casts.filter(cast => cast.spell !== RESEARCH_SPELL)
+    const firstRecall = parsed.casts.find(cast => cast.spell === '翻本子')
+    const latestInput = firstRecall && agent.session.snapshotEvents?.().findLast(event => {
+      if (event.type !== 'user/message') return false
+      const source = (event.data.message ?? event.data).source
+      return source?.kind === 'user' || (source?.kind === SPELL_SOURCE && source.recalled)
+    })
+    const source = latestInput && (latestInput.data.message ?? latestInput.data).source
+    const bridgeHandlesRecall = bridgeLookup && source?.qqLookup === true
+      && parsed.casts.length === 1 && !parsed.unknown.length
+    const casts = parsed.casts.filter(cast => cast.spell !== RESEARCH_SPELL
+      && (cast.spell !== '翻本子' || (cast === firstRecall && !source?.recalled && !bridgeHandlesRecall)))
     // 念了还没学会的名字:不执行,但必须回话。静默等于告诉模型"成功了"。
     const unknown = parsed.unknown.map(cast => ({
       cast, ok: false,
@@ -162,7 +173,9 @@ export class SpellRunner {
       // 而只要主会话还在,回填就是一条普通消息。超过上限或会话已销毁时不回填,
       // 但**绝不静默丢弃**——把结果交出去,由上层决定补投到哪里。
       if (results.length && active()) {
-        await this.followupOf(agent)(spellMessage(results.map(result => renderFeedback(result.cast, result)).join('\n\n')))
+        const recalled = results.some(result => result.cast.spell === '翻本子')
+        const feedback = results.map(result => renderFeedback(result.cast, result)).join('\n\n')
+        await this.followupOf(agent)(spellMessage(feedback + (recalled ? '\n我已经翻过本子，这就接着回答原话。' : ''), { recalled }))
       } else if (results.length) {
         try { await this.onAbandoned(agent, results) } catch (error) {
           this.logger.warn?.(`[dsh-rin-memory] 咒语结果补投失败：${error?.message ?? error}`)

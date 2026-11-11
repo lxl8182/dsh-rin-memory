@@ -136,6 +136,21 @@ function fixture() {
   return { runtime, agent, emit, feedback, workers, hooks }
 }
 
+test('an active proactive draft gets a chat prompt and never executes a spell', async () => {
+  const f = fixture(), agent = f.agent('owner')
+  f.runtime.observeAgent(agent)
+  f.runtime.proactive.active.set(agent.session.id, { request_id: 'contact:test' })
+  const assemble = f.hooks.get(agent).get('system-prompt/assemble')[0]
+  const shaped = await assemble({}, {}, async () => ({ sections: [], tools: [{ name: 'pwsh' }] }))
+  assert.deepEqual(shaped.tools, [])
+  assert.ok(shaped.sections.some(row => row.name === 'rin-memory:proactive'))
+  assert.doesNotMatch(JSON.stringify(shaped.sections), /翻本子|查资料/)
+  f.emit(agent, '<翻本子>游戏</翻本子>', 1)
+  await f.runtime.spellRunner.tail
+  assert.deepEqual(f.feedback, [])
+  await f.runtime.spellRunner.dispose()
+})
+
 test('a desktop QQ preset executes and follows up with no bridge or QQ binding', async () => {
   const f = fixture(), main = f.agent('desktop-local')
   f.runtime.observeAgent(main)

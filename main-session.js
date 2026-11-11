@@ -47,7 +47,7 @@ export const MAIN_SESSION_TOOLS = Object.freeze([])
  */
 export const MAGIC_SECTION = 'rin-memory:magic'
 const RECALL_RULE = '<翻本子>想找的事</翻本子>'
-const RESEARCH_RULE = '<查资料>查询词或完整网址</查资料> —— 想知道近况、核实消息或看网页时，我先查一眼。查近况时，我用今天的年月确定查询范围。'
+const RESEARCH_RULE = '<查资料>查询词或完整网址</查资料> —— 我按对方原话保留名称和规格，查近况时用今天的年月确定范围。收到资料后，先核对它是否回答了原问题。'
 const CAST_RULE = '有事要实际动手时，我单独写一行，从开标签写到闭标签。等【终端反馈】回来，我再告诉对方结果。'
 
 /** 魔法段的正文。写法权在模型,执行权在程序;模型不得自己编造结果。 */
@@ -56,7 +56,7 @@ const BASE_MAGIC_RULES = [
   CAST_RULE,
   '1. 读文件:<读取>本地路径</读取>',
   '2. 执行:<执行>具体操作</执行>',
-  '3. ' + RECALL_RULE,
+  '3. ' + RECALL_RULE + ' —— 我先用本轮自然想起的事。主人明确问到以前的事、手边又缺具体记录时，我才查一次。拿到反馈就接着回答。',
   '4. 改写:<改写>旧内容 ||| 正确内容</改写> —— 主人纠正我的记忆时用',
   '5. 撕掉:<撕掉>要忘掉的事</撕掉> —— 主人想让我忘掉一件事时用',
   // 和 3/4/5 完全同格式的一条,说明只讲"什么情况下用":这条的正文不进任何地方,
@@ -76,8 +76,7 @@ const BASE_MAGIC_RULES = [
 
 const CONTACT_RULES = [
   '【想找主人聊天时】',
-  '我有想分享的事，也可以主动开口。想约下次就在话末写<下次联系>明天20:30｜想聊的事</下次联系>，也可以写等新进展或暂停。',
-  '我从候选材料里挑了一件，就在话末记<选题>候选编号</选题>。',
+  '我有想分享的事，也可以主动开口。主人和我聊到以后要接着做的具体事情时，我可以在话末记<下次联系>时间｜想聊的事</下次联系>。随口打招呼就自然回应。',
 ].join('\n')
 
 /**
@@ -185,13 +184,14 @@ export class MainSessionScope {
    * @param {boolean} [options.chatOnly] 使用公开聊天人设和工具隔离。
    */
   constructor(agent, { currentPersona, currentAwareness = () => '', learned = () => [], research = () => false,
-    readOnlySpells = () => undefined, currentDate = () => '', chatOnly = false,
+    readOnlySpells = () => undefined, currentDate = () => '', proactive = () => false, chatOnly = false,
     managedCompaction = !chatOnly, logger = console } = {}) {
     this.agent = agent
     this.currentPersona = currentPersona ?? (() => '')
     this.currentAwareness = currentAwareness
     this.learned = learned
     this.research = research
+    this.proactive = proactive
     this.readOnlySpells = readOnlySpells
     this.currentDate = currentDate
     this.chatOnly = chatOnly
@@ -327,8 +327,13 @@ export class MainSessionScope {
     const date = this.currentDate()
     if (date) sections.push({ name: 'rin-memory:date',
       text: `今天是 ${date}。我以这个日期理解「最近」和「今年」。`, interpolate: false })
-    sections.push({ name: this.chatOnly ? 'rin-memory:chat' : MAGIC_SECTION,
-      text: this.chatOnly ? readOnlyMagic(this.readOnlySpells()) : magicText({ learned: this.learned(), research: this.research() }), interpolate: false })
+    if (this.proactive()) {
+      sections.push({ name: 'rin-memory:proactive', interpolate: false,
+        text: `这轮我用本轮带来的回忆和候选直接写想发出的消息，或者写 [PASS]。我只聊天，回忆和资料已由程序准备好。\n${THINKING_VOICE}` })
+    } else {
+      sections.push({ name: this.chatOnly ? 'rin-memory:chat' : MAGIC_SECTION,
+        text: this.chatOnly ? readOnlyMagic(this.readOnlySpells()) : magicText({ learned: this.learned(), research: this.research() }), interpolate: false })
+    }
     // tools 恒为空:不是"过滤",而是明确不报送任何 schema——见 MAIN_SESSION_TOOLS
     // 上方的实测说明。少了这个字段,thinking 才留在角色里。
     // 可选运行上下文清空；required 工作目录由本会话的空正文注册覆盖。

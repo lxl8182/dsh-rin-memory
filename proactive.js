@@ -44,12 +44,8 @@ export class ProactiveRuntime {
       state.activity[key] = { ...state.activity[key], last_outbound: this.now() }
     })
   }
-  clockMaterial(sessionId, now = this.now()) {
-    const key = this.runtime.bridge?.binding?.(sessionId)?.sessionKey
-    const plan = this.state.plans[key]
+  clockMaterial(now = this.now()) {
     return `【此刻】${localClock(now, this.config.timezone).display}（${this.config.timezone}）`
-      + (plan?.status === 'scheduled' ? `\n我先前记下的联系安排：${plan.intent || '到时再看看'}；`
-        + (plan.next_contact_at ? localClock(plan.next_contact_at, plan.timezone).display : plan.mode) : '')
   }
   chatClockMaterial(sessionId, now = this.now()) {
     const seen = this.runtime.client.state.injected?.[sessionScopeId(sessionId)] ?? {}
@@ -57,7 +53,7 @@ export class ProactiveRuntime {
       .reduce((latest, [, entry]) => Math.max(latest, Date.parse(typeof entry === 'string' ? entry : entry?.at) || 0), 0)
     if (last && Date.parse(now) - last < 4 * 3600000
       && localClock(last, this.config.timezone).date === localClock(now, this.config.timezone).date) return ''
-    return this.clockMaterial(sessionId, now)
+    return this.clockMaterial(now)
   }
 
   scopeFor(sessionId) {
@@ -69,14 +65,17 @@ export class ProactiveRuntime {
     return runtime.memoryScope(sessionId)
   }
   event(session, event) {
-    if (event.type === 'turn/start') this.busy.add(session.id)
-    if (event.type === 'assistant/message' && !event.data?.interrupted) {
+    const run = this.active.get(session.id)
+    if (event.type === 'turn/start') {
+      this.busy.add(session.id)
+      if (run) run.turn ??= event.data?.turn
+    }
+    if (event.type === 'assistant/message' && !event.data?.interrupted && !run) {
       this.tail = this.tail.then(() => this.remember(session.id, event.data.message))
         .catch(error => this.runtime.logger.warn?.('[dsh-rin-memory] 联系安排保存失败：' + error.message))
     }
     if (event.type !== 'turn/end') return
     this.busy.delete(session.id)
-    const run = this.active.get(session.id)
     if (!run || run.turn !== event.data?.turn) { this.arm(); return }
     this.tail = this.tail.then(async () => {
       try { await this.finish(session, event, run) }
@@ -113,7 +112,8 @@ export class ProactiveRuntime {
         state.plans[binding.sessionKey] = { plan_id: old?.plan_id ?? randomUUID(),
           revision: (old?.revision ?? 0) + 1, character_id: this.runtime.config.characterId,
           subject: this.runtime.config.subject, session_binding: binding.sessionKey,
-          ...parsed, reason: parsed.intent, topic_refs: run?.candidates?.map(row => row.candidate_id) ?? [],
+          ...parsed, origin: run ? 'proactive' : 'chat', reason: parsed.intent,
+          topic_refs: run?.candidates?.map(row => row.candidate_id) ?? [],
           material_refs: run?.candidates?.flatMap(row => row.material_refs ?? []) ?? [],
           memory_refs: run?.context?.context?.memory_ids ?? [], context_basis: run?.context?.basis ?? {},
           source_keys: run ? contextReferences(run.context).sources : [
@@ -126,6 +126,7 @@ export class ProactiveRuntime {
       }
     })
     if (error) this.runtime.logger.warn?.('[dsh-rin-memory] 联系时间未采用：' + error)
+    else if (parsed) this.runtime.logger.info?.(`[dsh-rin-memory] 已保存联系安排 ${run ? 'proactive' : 'chat'} ${parsed.next_contact_at ?? parsed.mode}`)
     this.arm()
   }
   async prepare(agent, payload) {
@@ -282,9 +283,12 @@ export class ProactiveRuntime {
         const key = binding.sessionKey, now = this.now(), plan = this.state.plans[key]
         if (Object.values(this.state.pending).some(row => row.binding === key)) continue
         if (friend && !this.allowed(key, now, { friend })) continue
+        const planReady = plan?.status === 'scheduled' && Date.parse(plan.next_contact_at) <= Date.parse(now)
+        const latestUser = agent.session.deriveMessages?.().findLast(message => message.source?.kind === 'user')
+        const contactQuery = planReady ? plan.intent : binding.input || (latestUser ? messageText(latestUser) : '')
         let context, summary
         try {
-          context = await runtime.client.request('/v1/context', { ...scope, text: plan?.intent ?? '' })
+          context = await runtime.client.request('/v1/context', { ...scope, text: contactQuery })
           if (friend && context.memory_enabled === false) continue
           summary = context.memory_enabled === false ? {} : await runtime.client.request('/v1/working-summary', scope, 'GET')
         } catch (error) {
@@ -295,7 +299,7 @@ export class ProactiveRuntime {
         const ready = pool.filter(row => Date.parse(row.due_at) <= Date.parse(now))
         const priority = ready.filter(row => row.agreed && row.status === 'pending' && this.allowed(key, now, row))
         if (plan?.mode === 'paused' && !priority.length) continue
-        const due = !priority.length && plan?.status === 'scheduled' && Date.parse(plan.next_contact_at) <= Date.parse(now)
+        const due = !priority.length && planReady
         const eligible = priority.length ? priority : ready.filter(row => !row.agreed && (due || row.status === 'pending'))
         if (friend && !eligible.length) continue
         const eventKey = fingerprint(eligible.filter(row => row.status === 'pending')
@@ -322,7 +326,7 @@ export class ProactiveRuntime {
         const finishOutput = runtime.bridge.beginOutput(sessionId)
         const run = { request_id, sessionId, binding: key, scope, context, candidates: choices, now, friend,
           allowOriginal: !friend && !priority.length,
-          plan_revision: plan?.revision, finishOutput }
+          intent: due ? plan.intent : '', plan_revision: plan?.revision, finishOutput }
         const previous = { initialized: this.state.initialized[key], decision: this.state.decisions[key],
           statuses: choices.map(row => [row.candidate_id, row.status]), opportunity: this.state.opportunities?.[key] }
         run.recovery = { ...previous, plan, due }
@@ -338,11 +342,11 @@ export class ProactiveRuntime {
           this.active.set(sessionId, run)
           const material = choices.map(row => ({ candidate_id: row.candidate_id, topic: row.topic, reason: row.reason,
             kind: row.kind, material: row.material_refs.map(id => this.state.materials[id]).filter(Boolean) }))
-          const background = await runtime.renderBackground?.(sessionId, context, agent, plan?.intent ?? '')
+          const background = await runtime.renderBackground?.(sessionId, context, agent, contactQuery)
           const activity = this.state.activity[key] ?? {}
           agent.followup({ id: request_id, role: 'user', source: { kind: PROACTIVE_SOURCE }, content: [{ type: 'text', text:
-            `${this.clockMaterial(sessionId, now)}\n【我想起的事】这会儿可以想想要不要找${friend ? '这位朋友' : '主人'}聊两句。这是我自己的联系机会。`
-            + `\n先前惦记的事：${plan?.intent || '还没有安排，可以先想想下次什么时候联系。'}`
+            `${this.clockMaterial(now)}\n【我想起的事】这会儿可以想想要不要找${friend ? '这位朋友' : '主人'}聊两句。这是我自己的联系机会。`
+            + (due && plan.intent ? `\n我之前自己想接着聊的事到了可以聊的时候：${plan.intent}` : '')
             + `\n最后真实收信：${activity.last_inbound || '没有记录'}；最后发信：${activity.last_outbound || '没有记录'}`
             + `\n${background?.text ?? ''}\n【可聊材料】${JSON.stringify(material)}`
             + '\n从中挑一件具体想聊的事，末尾记<选题>候选编号</选题>。只看了标题或简介，就按读到的范围聊。'
@@ -351,8 +355,9 @@ export class ProactiveRuntime {
               ? '\n我也可以分享自己想聊的事，在话末写<选题>自己想聊</选题>。'
               : '\n只围绕这件待跟进的事开口。')
             + '\n没有想说的可以写[PASS]。这轮只聊天。'
-            + (friend ? '' : '我也可以记下次联系、等新进展或暂停。')
+            + (friend ? '' : '我确实想日后继续聊某件事时，可以在末尾记<下次联系>时间｜主题</下次联系>。这是我自己的打算，无需专门发消息确认时间。')
             + '\n沉默只是没有收到新消息；不要推断已读、忙碌、不喜欢或关系变化。' }] })
+          runtime.logger.info?.(`[dsh-rin-memory] 主动搭话开始 ${request_id} ${friend ? 'friend' : 'owner'} candidates=${choices.length} scheduled=${Boolean(due)}`)
         } catch (error) {
           finishOutput()
           this.active.delete(sessionId)
@@ -378,15 +383,22 @@ export class ProactiveRuntime {
     const end = events.findIndex((row, index) => index > start && row.type === 'turn/end' && row.data?.turn === event.data.turn)
     const messages = (start < 0 ? [] : events.slice(start, end < 0 ? undefined : end + 1))
       .filter(row => row.type === 'assistant/message' && !row.data?.interrupted)
-    for (const row of messages) await this.remember(session.id, row.data.message)
     const controls = contactControls(runtime.bridge.assistantText(messages))
+    const parsed = parseSpells(controls.text)
+    if (parsed.casts.length || parsed.unknown.length) {
+      runtime.logger.warn?.(`[dsh-rin-memory] 主动搭话忽略动作咒语 ${run.request_id}`)
+      return
+    }
+    for (const row of messages) await this.remember(session.id, row.data.message)
     if (controls.contact === undefined && this.state.plans[run.binding]?.revision === run.plan_revision
       && this.state.plans[run.binding]?.status === 'consumed') {
       await this.save(state => { state.plans[run.binding].mode = 'on_event' })
     }
-    const parsed = parseSpells(controls.text)
     const plan = runtime.bridge.planOutput(parsed.visible)
-    if (!plan.text.trim() || parsed.casts.length || parsed.unknown.length) return
+    if (!plan.text.trim()) {
+      runtime.logger.info?.(`[dsh-rin-memory] 主动搭话跳过 ${run.request_id}`)
+      return
+    }
     const choice = controls.choice
     const selected = run.candidates?.find(row => row.candidate_id === choice || row.material_refs.includes(choice))
       ?? (!run.friend && !choice && run.candidates?.length === 1 ? run.candidates[0] : undefined)
@@ -403,7 +415,7 @@ export class ProactiveRuntime {
         cause: { kind: selected?.kind ?? (choice === '自己想聊' ? 'original' : 'followup'), candidate_id: selected?.candidate_id,
           material_refs: selected?.material_refs ?? [], topic: selected?.topic, reason: selected?.reason,
           source_keys: [...new Set([...(selected?.memory_refs ?? []), ...contextReferences(run.context).sources])],
-          context_basis: run.context.basis, intent: this.state.plans[run.binding]?.intent ?? '' } } }
+          context_basis: run.context.basis, intent: run.intent ?? '' } } }
     await this.save(state => { state.pending[run.request_id] = pending })
     await this.send(run.request_id)
   }
@@ -469,6 +481,7 @@ export class ProactiveRuntime {
       : await runtime.bridge.deliverOutput(sessionId, pending.output_id, parts, canSend)
     if (!delivered) throw new Error('QQ 持久投递接口不可用')
     const accepted = delivered.parts.filter(part => part.ok)
+    runtime.logger.info?.(`[dsh-rin-memory] 主动搭话投递 ${id} ${delivered.status} sent=${accepted.length}`)
     if (accepted.length) {
       await runtime.client.request('/v1/outputs/deliver', { ...pending.scope, output_id: pending.output_id,
         kind: 'sent', parts: accepted.map(part => ({ index: part.index, platform_id: part.platformId })) })

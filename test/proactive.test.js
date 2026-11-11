@@ -135,12 +135,16 @@ test('ordinary contact waits once across restarts, respects quiet and quota, and
 test('chat clocks are sparse, refresh at midnight, and proactive clocks stay current', () => {
   const { runtime, agent, advance } = harness()
   const proactive = new ProactiveRuntime(runtime), scope = sessionScopeId(agent.session.id)
+  proactive.state.plans[runtime.bridge.binding(agent.session.id).sessionKey] = {
+    status: 'scheduled', intent: '打游戏近况', timezone: 'Asia/Shanghai', next_contact_at: '2026-10-29T13:00:00Z',
+  }
   const first = runtime.client.now()
   assert.match(proactive.chatClockMaterial(agent.session.id), /2026-10-29 12:00/)
+  assert.doesNotMatch(proactive.chatClockMaterial(agent.session.id), /打游戏近况|联系安排/)
   runtime.client.state.injected = { [scope]: { 'clock:previous': { at: first, messageId: 'memory:clock' } } }
   advance(60000)
   assert.equal(proactive.chatClockMaterial(agent.session.id), '')
-  assert.match(proactive.clockMaterial(agent.session.id), /12:01/)
+  assert.match(proactive.clockMaterial(), /12:01/)
   advance(59 * 60000)
   assert.equal(proactive.chatClockMaterial(agent.session.id), '')
   advance(3 * 3600000)
