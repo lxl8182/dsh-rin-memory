@@ -1592,11 +1592,13 @@ class MemoryRuntime {
     for (const seq of session.surface?.nodes ?? []) {
       const event = session.eventAt(seq)
       if (event?.type !== 'user/message' || event.data.source?.kind !== RESEARCH_SOURCE) continue
-      const { history } = event.data.source
+      const { history, spell } = event.data.source
       const links = history ?? messageText(event.data).split('\n')
         .map(line => line.trim()).filter(line => /^https?:\/\/\S+$/u.test(line)).slice(0, 4).join('\n')
+      const summary = spell === '翻本子' ? '【我已回看这次聊到的旧事】'
+        : links ? `【查过的来源】\n${links}` : '【这次查资料已结束】'
       session.append('user/message', { ...event.data, source: { kind: 'companion-research-summary' },
-        content: [{ type: 'text', text: links ? `【查过的来源】\n${links}` : '【这次查资料已结束】' }] },
+        content: [{ type: 'text', text: summary }] },
       { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] })
     }
   }
