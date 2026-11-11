@@ -1,7 +1,11 @@
 const API = 'https://api.anysearch.com/v1'
 const words = new Intl.Segmenter('zh-CN', { granularity: 'word' })
 const commonWords = new Set(['这个', '那个', '网页', '链接', '看看', '什么', '怎么', '介绍', '一下',
-  '搜索', '查询', '帮忙', '最近', '最新', '最低', '价格', '最低价', '报价', '购买', 'the', 'and', 'for', 'price'])
+  '搜索', '查询', '帮忙', '最近', '最新', '最低', '价格', '最低价', '最低价格', '报价', '购买', 'the', 'and', 'for', 'price'])
+
+function normalize(text) {
+  return text.normalize('NFKC').toLowerCase()
+}
 
 function publicUrl(value) {
   try {
@@ -12,7 +16,7 @@ function publicUrl(value) {
 }
 
 function searchTerms(question) {
-  const text = question.slice(0, 600).normalize('NFKC').toLowerCase().replace(/https?:\/\/\S+/gu, '')
+  const text = normalize(question.slice(0, 600)).replace(/https?:\/\/\S+/gu, '')
   const terms = []
   let han = ''
   for (const { segment, isWordLike } of words.segment(text)) {
@@ -39,16 +43,16 @@ function excerpts(content, question) {
     .map(row => row.text.slice(0, 500)).join('\n')
 }
 
-function rankSearchCards(cards, query, question) {
+function rankSearchCards(cards, query, question, phrase) {
   const queryTerms = searchTerms(query)
   const questionTerms = searchTerms(question)
   if (!queryTerms.length && !questionTerms.length) return cards
   return cards.map(card => {
-    const title = card.title.normalize('NFKC').toLowerCase()
-    const summary = card.summary.normalize('NFKC').toLowerCase()
+    const title = normalize(card.title)
+    const summary = normalize(card.summary)
     const score = terms => terms.reduce((sum, term) =>
       sum + (title.includes(term) ? 3 : summary.includes(term) ? 1 : 0), 0)
-    return { card, score: 2 * score(questionTerms) + score(queryTerms) }
+    return { card, score: 2 * score(questionTerms) + score(queryTerms) + (phrase ? 4 * score([phrase]) : 0) }
   }).filter(row => row.score > 0).sort((a, b) => b.score - a.score).map(row => row.card)
 }
 
@@ -68,6 +72,11 @@ export async function researchWeb(input, { key = process.env.ANYSEARCH_API_KEY, 
   const query = input.trim()
   if (!query || query.length > 2000) throw new Error('查询词或链接长度无效。')
   const url = publicUrl(query)
+  const original = question.trim().slice(0, 600)
+  const normalizedOriginal = normalize(original)
+  const anchors = normalize(query).split(/\s+/u).map(term => term.replace(/["“”]/gu, ''))
+    .filter(term => term.length >= 2 && !commonWords.has(term) && !/^\d/u.test(term) && normalizedOriginal.includes(term))
+  const phrase = anchors.length >= 2 ? anchors.at(-1) : ''
   const signal = AbortSignal.timeout(20000)
   const fetchCards = async query => {
     const response = await fetcher(`${API}/${url ? 'extract' : 'search'}`, {
@@ -90,13 +99,30 @@ export async function researchWeb(input, { key = process.env.ANYSEARCH_API_KEY, 
       throw new Error('AnySearch 返回了无效结果。')
     }
     return url ? [sourceCard({ ...data, url }, question)].filter(Boolean)
-      : rankSearchCards(data.results.slice(0, 5).map(row => sourceCard(row)).filter(Boolean), query, question)
+      : data.results.slice(0, 5).map(row => sourceCard(row)).filter(Boolean)
   }
   let cards = await fetchCards(query)
-  const original = question.trim().slice(0, 600)
-  const normalize = text => text.normalize('NFKC').replace(/\s+/gu, '').toLowerCase()
-  if (!url && !cards.length && original && normalize(original) !== normalize(query)) {
-    cards = await fetchCards(original)
+  if (!url) {
+    cards = rankSearchCards(cards, query, original, phrase)
+    const matchesPhrase = card => normalize(`${card.title} ${card.summary}`).includes(phrase)
+    const foundPhrase = !phrase || cards.some(matchesPhrase)
+    if (original && (!cards.length || !foundPhrase)) {
+      let retry = original
+      if (phrase) {
+        const specifications = searchTerms(original).filter(term => /^\d/u.test(term))
+        const terms = [...anchors.slice(0, -1), `"${phrase}"`, ...specifications]
+        if (/价格|最低价|报价/u.test(original)) terms.push('价格')
+        retry = [...new Set(terms)].join(' ')
+      }
+      if (normalize(retry) !== normalize(query)) {
+        const more = await fetchCards(retry).catch(error => {
+          if (!cards.length) throw error
+          return []
+        })
+        cards = rankSearchCards([...more, ...cards], query, original, phrase)
+      }
+    }
+    if (phrase && cards.some(matchesPhrase)) cards = cards.filter(matchesPhrase)
   }
   const distinct = new Map()
   for (const card of cards) {

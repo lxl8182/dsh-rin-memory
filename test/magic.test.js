@@ -34,20 +34,22 @@ test('AnySearch error bodies stay out of spell feedback', async () => {
     new Response('private upstream details', { status: 402 }) }), { message: 'AnySearch 额度不足（HTTP 402）。' })
 })
 
-test('unrelated search results retry once with the original question before returning sources', async () => {
+test('search retries once with the exact name and specification from the original question', async () => {
   const requests = []
-  const question = '帮我查赤裸玫瑰香水 50ml 的最低价格'
-  const result = await researchWeb('阿玛尼 高定私藏 赤裸玫瑰', { key: 'mock-key', question,
+  const question = '帮我查一下阿玛尼赤裸玫瑰50ml最低价格'
+  const query = '阿玛尼 高定私藏 赤裸玫瑰 最低价格'
+  const result = await researchWeb(query, { key: 'mock-key', question,
     fetcher: async (_url, init) => {
       requests.push(JSON.parse(init.body).query)
       return Response.json({ code: 0, data: { results: [
         { title: '刑事判决书', url: 'https://example.com/judgment' },
+        { title: '阿玛尼米兰玫瑰 100ml', url: 'https://example.com/other-rose' },
         ...(requests.length === 2 ? [{ title: '赤裸玫瑰香水 50ml', url: 'https://example.com/product' }] : []),
       ] } })
     } })
-  assert.deepEqual(requests, ['阿玛尼 高定私藏 赤裸玫瑰', question])
-  assert.match(result.history, /赤裸玫瑰香水 50ml/)
-  assert.doesNotMatch(result.text, /判决书/)
+  assert.deepEqual(requests, [query, '阿玛尼 "赤裸玫瑰" 50ml 价格'])
+  assert.match(result.history, /^1\. 赤裸玫瑰香水 50ml/)
+  assert.doesNotMatch(result.text, /判决书|米兰玫瑰/)
 })
 
 test('spells are lifted out of the visible text, never shown to the owner', () => {
