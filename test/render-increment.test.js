@@ -247,7 +247,7 @@ test('G20: state / episode / growth fragments really land in the final message l
   assert.match(text, /她今天有点累/)
   assert.match(text, /\[这段经历\]/, 'the episode reaches the model')
   assert.match(text, /约好周日下午模拟/)
-  // 指纹确实被登记:下一轮不会重贴。
+  // 指纹与引用记录已采用的材料。
   const scope = Object.keys(runtime.client.state.injected)[0]
   assert.ok(scope, 'the injected index was written')
   assert.equal(Object.keys(runtime.client.state.injected[scope]).filter(key => !key.startsWith('clock:')).length, 9)
@@ -270,21 +270,23 @@ test('narrative projection changes viewpoint while preserving quotes, raw facts 
   assert.equal(source.context.block, raw)
 })
 
-test('G20: a turn with nothing new adds no message at all', async () => {
-  const { runtime } = runtimeWith(context())
+test('an empty current selection adds no message after a populated turn', async () => {
+  const served = context()
+  const { runtime } = runtimeWith(served)
   const agent = { session: { id: 'qq-g20b', header: {} }, options: {}, followup() {} }
   const first = await runtime.preStep(
     agent, { turn: 1, step: 1, messages: [userMessage('m1', '你好')] },
     async () => ({ kind: 'enter', messages: [userMessage('m1', '你好')] }),
   )
   assert.equal(first.messages.length, 2)
-  // 第二轮:同一份材料,已经交付过 → 不追加任何消息。
+  served.context = { selection: { version: 1, status: 'empty', items: [] } }
+  served.state = null
   runtime.client.now = () => '2026-10-27T12:01:00.000Z'
   const second = await runtime.preStep(
     agent, { turn: 2, step: 1, messages: [userMessage('m2', '换个话题')] },
     async () => ({ kind: 'enter', messages: [userMessage('m2', '换个话题')] }),
   )
-  assert.equal(second.messages.length, 1, 'no placeholder and no re-posted material')
+  assert.equal(second.messages.length, 1)
 })
 
 test('selection v1 reserves only rendered references and records them when admitted to history', async () => {
@@ -321,9 +323,43 @@ test('selection v1 reserves only rendered references and records them when admit
   const history = Object.values(runtime.client.state.references)[0]
   assert.equal(generated.body.memory_selection_adopted, true)
   assert.deepEqual(history.ids, ['f1', 'f2', 'tea'])
-  assert.equal((await step(3)).messages.length, 1)
-  assert.deepEqual(bodies[requests.lastIndexOf('/v1/context/reserve')].consumer_refs.memory_ids, [])
+  assert.equal((await step(3)).messages.length, 2)
+  assert.deepEqual(bodies[requests.lastIndexOf('/v1/context/reserve')].consumer_refs.memory_ids, ['f1', 'f2'])
   assert.deepEqual(Object.values(runtime.client.state.references)[0].ids, history.ids)
   visible = []
   assert.ok((await step(4)).messages.some(message => message.source.kind === 'rin-memory'))
+})
+
+test('restored active history projects real dialogue out of a contaminated checkpoint', async () => {
+  const served = context({ context: { selection: { version: 1, status: 'empty', items: [] } } })
+  const { runtime } = runtimeWith(served)
+  const input = userMessage('original', '北星 P2 怎么样')
+  const stale = { ...userMessage('stale', '我喜欢北星 P2'), source: { kind: 'rin-memory' } }
+  const checkpoint = { ...userMessage('checkpoint', '用户喜欢北星 P2'), source: { kind: 'compact-checkpoint' } }
+  const carry = { ...userMessage('carry', '之前看过测评'), source: { kind: 'segment-carry' } }
+  const events = [
+    { type: 'user/message', data: stale },
+    { type: 'user/message', data: input },
+    { type: 'user/message', data: checkpoint, sourceEventSeqs: [0, 1] },
+    { type: 'user/message', data: stale },
+    { type: 'user/message', data: carry },
+  ]
+  const nodes = [2, 3, 4]
+  const session = {
+    id: 'qq-restored', header: {}, surface: { nodes },
+    eventAt: seq => events[seq],
+    deriveMessages: () => nodes.map(seq => events[seq]).filter(event => event.type === 'user/message').map(event => event.data),
+    append(type, data, { surfaceOp }) {
+      nodes[nodes.indexOf(surfaceOp.startSeq)] = events.length
+      events.push({ type, data })
+    },
+  }
+  const agent = { session, options: {} }
+  const messages = [userMessage('m2', '还有呢')]
+  const next = await runtime.preStep(agent, { turn: 2, step: 1, messages }, async () => ({ kind: 'enter', messages }))
+  const modelInput = JSON.stringify([...session.deriveMessages(), ...next.messages])
+  assert.match(modelInput, /北星 P2 怎么样|之前看过测评/)
+  assert.doesNotMatch(modelInput, /喜欢北星 P2/)
+  assert.equal(events[2].data, checkpoint)
+  assert.equal(events[3].data, stale)
 })

@@ -58,6 +58,100 @@ const SEGMENT_POLICY_SERVICE = 'companionSegmentPolicy'
 
 /** 注入消息的来源标记,供去重与“谁是资料”判断使用。 */
 const MEMORY_SOURCE = 'rin-memory'
+const COMPACT_CHECKPOINT = 'compact-checkpoint'
+const compactionProjections = new WeakMap()
+
+function rebuildCheckpoint(session, checkpoint) {
+  const seen = new Set()
+  const exchanges = []
+  let hasMemory = false
+  function visit(seq) {
+    if (seen.has(seq)) return
+    seen.add(seq)
+    const event = session.eventAt(seq)
+    if (event?.type === 'user/message') {
+      const { source } = event.data
+      if (source?.kind === MEMORY_SOURCE) hasMemory = true
+      if (source?.kind === COMPACT_CHECKPOINT) {
+        for (const parent of event.sourceEventSeqs ?? []) visit(parent)
+      }
+      if (source?.kind === 'user') exchanges.push(['用户', messageText(event.data)])
+      if (source?.kind === 'segment-carry' || source?.kind === 'rin-compacted-dialogue') {
+        exchanges.push(['较早对话', messageText(event.data)])
+      }
+    } else if (event?.type === 'assistant/message' && !event.data.interrupted) {
+      exchanges.push(['助手', messageText(event.data.message)])
+    }
+  }
+  const sources = checkpoint.sourceEventSeqs
+  if (sources?.length) {
+    for (const seq of sources) visit(seq)
+  } else {
+    hasMemory = true
+    const visible = new Set(session.surface.nodes)
+    for (const event of session.snapshotEvents()) {
+      if (event.seq >= checkpoint.seq) break
+      if (!visible.has(event.seq)) visit(event.seq)
+    }
+  }
+  if (!hasMemory) return undefined
+  const text = exchanges.filter(([, text]) => text).map(([speaker, text]) => speaker + '：' + text)
+    .join('\n').slice(-8000)
+  return text ? {
+    id: checkpoint.data.id + ':dialogue',
+    role: 'user',
+    source: { kind: 'rin-compacted-dialogue' },
+    content: [{ type: 'text', text: '【较早对话原文】\n' + text }],
+  } : null
+}
+
+function projectMemoryHistory(session, turn, step, keepId) {
+  for (const seq of session.surface?.nodes ?? []) {
+    const event = session.eventAt(seq)
+    if (event?.type !== 'user/message' || event.data.id === keepId) continue
+    const kind = event.data.source?.kind
+    const replacement = kind === MEMORY_SOURCE ? null
+      : kind === COMPACT_CHECKPOINT ? rebuildCheckpoint(session, event) : undefined
+    if (replacement === undefined) continue
+    const placement = { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] }
+    if (replacement) {
+      session.append('user/message', replacement, placement)
+    } else {
+      session.append('developer/message', { turn, step, message: {
+        id: event.data.id + ':retired',
+        role: 'developer',
+        source: { kind: 'rin-retired-background' },
+        content: [],
+      } }, placement)
+    }
+  }
+}
+
+function projectCompaction(service, session) {
+  if (typeof service?.summarize !== 'function') return () => {}
+  let projection = compactionProjections.get(service)
+  if (!projection) {
+    const original = service.summarize
+    const sessions = new Set()
+    const summarize = async function (input, agent, signal) {
+      if (!sessions.has(agent.session)) return original.call(this, input, agent, signal)
+      const messages = input.messages.filter(message => message.source?.kind !== MEMORY_SOURCE)
+      if (messages.length === input.messages.length) return original.call(this, input, agent, signal)
+      const { llmStreamCall, ...result } = await original.call(this, { ...input, messages }, agent, signal)
+      return result
+    }
+    projection = { original, sessions, summarize }
+    service.summarize = summarize
+    compactionProjections.set(service, projection)
+  }
+  projection.sessions.add(session)
+  return () => {
+    projection.sessions.delete(session)
+    if (projection.sessions.size) return
+    if (service.summarize === projection.summarize) service.summarize = projection.original
+    compactionProjections.delete(service)
+  }
+}
 
 /** 后台任务结果的来源标记:既不是用户发言,也不是记忆资料。 */
 const TASK_SOURCE = 'companion-task'
@@ -1066,6 +1160,10 @@ class MemoryRuntime {
       return
     }
     const dispose = agent.ctx.effect(() => {
+      projectMemoryHistory(agent.session, 0, 0)
+      const compaction = agent.ctx.inject?.(['compaction'], scope => {
+        scope.effect(() => projectCompaction(scope.get('compaction'), agent.session))
+      })
       const offStep = agent.ctx.on('agent/pre-step', (payload, next) => this.preStep(agent, payload, next))
       const offEvent = !this.isTrusted(agent)
         ? agent.ctx.on('session/event', (subject, event) => this.sessionEvent(agent, subject, event)) : undefined
@@ -1075,6 +1173,7 @@ class MemoryRuntime {
       const offPrompt = this.isTrusted(agent) ? this.registerPrompt(agent, sessionId) : undefined
       const offTools = this.registerTools(agent)
       return () => {
+        compaction?.dispose()
         offStep?.()
         offEvent?.()
         offPrompt?.()
@@ -1349,6 +1448,9 @@ class MemoryRuntime {
    */
   async preStep(agent, payload, next) {
     const sessionId = agent.session.id
+    const active = this.turns.get(agent)
+    const keepId = active?.turn === payload.turn ? 'memory:' + active.requestId : undefined
+    projectMemoryHistory(agent.session, payload.turn, payload.step, keepId)
     if (payload.messages?.some(message => message.source?.kind === RESEARCH_SOURCE)) {
       this.researchTurns.set(agent, payload.turn)
     } else if (payload.step === 1 && payload.messages?.some(message => message.source?.kind === PROACTIVE_SOURCE)) {
@@ -1556,9 +1658,9 @@ class MemoryRuntime {
     // The turn key is the DSH user-message id alone, so the bridge can compute
     // the same key for its send receipt without knowing this turn number.
     const requestId = turnKeyOf({ sessionId, messageId: input.messageId })
+    const admission = this.admissions.get(sessionId)
+    this.admissions.delete(sessionId)
     try {
-      const admission = this.admissions.get(sessionId)
-      this.admissions.delete(sessionId)
       const context = admission?.input.input === input.text && admission.scope?.subject === scope.subject
         ? admission.context : await this.turnContext(scope, input.text, segmentKey, sessionId)
       if (owner) requirePersona(context)
@@ -1587,10 +1689,7 @@ class MemoryRuntime {
         ...scope,
         request_id: requestId,
         context_receipt_id: context.context_receipt_id,
-        // QP05:登记"这一轮真的消费了哪些记忆 id"。网页来源的事实本身没有插件
-        // 段,不登记的话,网页删除它时本插件永远收不到清理待办,已注入的正文
-        // 就会留在 DSH 历史里。只报 id 与代际,不报正文;服务端还会用已签发的
-        // context 复核,客户端多报的 id 会被过滤掉。
+        // 登记本轮的来源引用，供删除原话或经历时定位会话副本。
         consumer_refs: {
           plugin_id: this.config.pluginId,
           session_id: sessionScopeId(sessionId),
@@ -1687,6 +1786,7 @@ class MemoryRuntime {
       return prepared
     } catch (error) {
       const classified = error.kind ? error : classifyTransportError(error)
+      if (admission && classified.kind === 'stale') return this.ensureTurn(agent, payload)
       // The bridge keeps the original input. No model call may cross this
       // boundary without the required persona and correction snapshot.
       this.health = {
@@ -1713,10 +1813,7 @@ class MemoryRuntime {
     const scopeId = sessionScopeId(sessionId)
     const index = this.client.state.injected[scopeId] ?? {}
     const history = agent?.session?.deriveMessages?.() ?? []
-    const present = new Set(history.filter(message => message.source?.kind === MEMORY_SOURCE).map(message => message.id))
-    const seen = context.context?.selection?.version === 1
-      ? Object.fromEntries(Object.entries(index).filter(([key, entry]) => present.has(entry?.messageId) || key.startsWith('clock:')))
-      : index
+    const seen = Object.fromEntries(Object.entries(index).filter(([key]) => key.startsWith('clock:')))
     return renderIncrement(context, seen, { scopeId,
       friend: this.bridge?.binding(sessionId)?.owner === false,
       currentInput,
@@ -1729,6 +1826,9 @@ class MemoryRuntime {
 
   sessionEvent(agent, subject, event) {
     if (subject !== agent.session && subject?.id !== agent.session?.id) return
+    if (event.type === 'turn/end' && this.attached.has(agent)) {
+      projectMemoryHistory(agent.session, event.data.turn, 1)
+    }
     if (this.turns.get(agent)?.proactive && !event.type.startsWith('compaction/')) return
     const active = this.turns.get(agent)
     const prepared = active?.prepared

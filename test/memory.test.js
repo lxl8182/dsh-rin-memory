@@ -324,7 +324,7 @@ test('friend facts keep their subject, public persona and durable receipts acros
   }
 })
 
-test('the persona lives in the system section; only new background is injected; one reply saved', async t => {
+test('the persona lives in the system section; each turn builds its background; one reply saved', async t => {
   const f = await fixture(t)
   const h = await start(t, f)
   const agent = makeAgent('qq-owner')
@@ -372,8 +372,7 @@ test('the persona lives in the system section; only new background is injected; 
   assert.equal(committed.body.reply, '好，记住了。')
   assert.ok(committed.body.source_key.startsWith('plugin:dsh_memory:companion:private:'))
 
-  // A new publication replaces the system section text; the unchanged
-  // background is not posted a second time.
+  // A new publication replaces the system section for the next turn.
   f.state.version = 'pub-2'
   f.state.persona = '更安静的版本。'
   const next = await agent.preStep({ turn: 2, step: 1, messages: [userMessage('m2', '今天吃什么')] })
@@ -382,9 +381,7 @@ test('the persona lives in the system section; only new background is injected; 
   assert.equal(f.requests.filter(row => row.path === '/v1/context').length, 2)
   assert.ok(f.requests.every(row => row.client === 'dsh-desktop'))
 
-  // Check 1: consecutive turns each carry their own user text exactly once, and
-  // an unchanged background adds no message at all.
-  assert.equal(next.messages.length, 1, 'no new background means no injected message')
+  assert.equal(next.messages.filter(message => message.source?.kind === 'rin-memory').length, 1)
   for (const [messages, text] of [[first.messages, '记住我喜欢红茶'], [next.messages, '今天吃什么']]) {
     assert.equal(messages.filter(message => JSON.stringify(message).includes(text)).length, 1,
       `"${text}" appears exactly once in its own request`)
@@ -392,16 +389,16 @@ test('the persona lives in the system section; only new background is injected; 
   assert.ok(!JSON.stringify(next.messages).includes('记住我喜欢红茶'),
     'the previous turn input is not replayed into the next request')
 
-  // A genuinely new memory entry is delivered once and only once.
+  // The current background includes the selected fact and the active correction.
   f.state.memoryIds = ['fact-2']
   const third = await agent.preStep({ turn: 3, step: 1, messages: [userMessage('m3', '还记得吗')] })
   const fresh = third.messages.find(message => message.source?.kind === 'rin-memory')
   assert.equal(fresh.source.kind, 'rin-memory')
   assert.match(fresh.content[0].text, /主人喜欢红茶/)
-  assert.ok(!fresh.content[0].text.includes('不要使用旧称呼'), 'an unchanged correction is not repeated')
+  assert.match(fresh.content[0].text, /不要使用旧称呼/)
 
   const fourth = await agent.preStep({ turn: 4, step: 1, messages: [userMessage('m4', '继续')] })
-  assert.equal(fourth.messages.length, 1, 'already-injected entries are not re-posted')
+  assert.equal(fourth.messages.filter(message => message.source?.kind === 'rin-memory').length, 1)
 })
 
 test('failed submit survives a restart and replays the same body once', async t => {
@@ -810,14 +807,14 @@ test('the injected background keeps the three kinds of material apart, without t
   assert.deepEqual(again.fingerprints, [])
 })
 
-test('a compaction opens a new context generation, so material can be re-delivered', async t => {
+test('the current background is rebuilt before and after compaction', async t => {
   const f = await fixture(t)
   const h = await start(t, f)
   const agent = makeAgent('qq-owner')
   h.ctx.emit('agent/created', { agent })
   await agent.preStep({ turn: 1, step: 1, messages: [userMessage('m1', '红茶怎么样')] })
   const quiet = await agent.preStep({ turn: 2, step: 1, messages: [userMessage('m2', '在干嘛')] })
-  assert.equal(quiet.messages.length, 1, 'unchanged material is not re-posted')
+  assert.match(quiet.messages[0].content[0].text, /不要使用旧称呼/)
 
   // Native compaction rewrote the history: the background may no longer be in
   // front of the model, so the next turn is allowed to deliver it again.
