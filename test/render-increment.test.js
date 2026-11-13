@@ -330,9 +330,14 @@ test('selection v1 reserves only rendered references and records them when admit
   assert.ok((await step(4)).messages.some(message => message.source.kind === 'rin-memory'))
 })
 
-test('restored active history projects real dialogue out of a contaminated checkpoint', async () => {
+test('a restored friend session clears old memory only while a request step is open', async () => {
   const served = context({ context: { selection: { version: 1, status: 'empty', items: [] } } })
   const { runtime } = runtimeWith(served)
+  runtime.bridge.binding = () => ({
+    owner: false, scope: 'private', userId: 42, friendMemoryEnabled: true, input: '还有呢',
+  })
+  const hooks = new Map()
+  let stepOpen = false
   const input = userMessage('original', '北星 P2 怎么样')
   const stale = { ...userMessage('stale', '我喜欢北星 P2'), source: { kind: 'rin-memory' } }
   const checkpoint = { ...userMessage('checkpoint', '用户喜欢北星 P2'), source: { kind: 'compact-checkpoint' } }
@@ -350,15 +355,35 @@ test('restored active history projects real dialogue out of a contaminated check
     eventAt: seq => events[seq],
     deriveMessages: () => nodes.map(seq => events[seq]).filter(event => event.type === 'user/message').map(event => event.data),
     append(type, data, { surfaceOp }) {
+      if (type === 'developer/message') {
+        assert.ok(stepOpen, 'DSH requires developer events to belong to an open step')
+        assert.equal(data.turn, 2)
+        assert.equal(data.step, 1)
+      }
       nodes[nodes.indexOf(surfaceOp.startSeq)] = events.length
       events.push({ type, data })
     },
   }
-  const agent = { session, options: {} }
+  const agent = { session, options: {}, ctx: {
+    effect: fn => fn(),
+    on(name, fn) { hooks.set(name, fn); return () => hooks.delete(name) },
+  } }
+  runtime.friendMemoryGrants.set(session.id, true)
+  runtime.attach(agent)
+  assert.equal(events.length, 5)
+
   const messages = [userMessage('m2', '还有呢')]
-  const next = await runtime.preStep(agent, { turn: 2, step: 1, messages }, async () => ({ kind: 'enter', messages }))
+  const next = await hooks.get('agent/pre-step')({ turn: 2, step: 1, messages }, async () => ({ kind: 'enter', messages }))
+  assert.equal(events.length, 5)
+
+  stepOpen = true
+  await hooks.get('agent/request')({ turn: 2, step: 1 }, async () => ({}))
+  stepOpen = false
+  hooks.get('session/event')(session, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+
   const modelInput = JSON.stringify([...session.deriveMessages(), ...next.messages])
-  assert.match(modelInput, /北星 P2 怎么样|之前看过测评/)
+  assert.match(modelInput, /北星 P2 怎么样/)
+  assert.match(modelInput, /之前看过测评/)
   assert.doesNotMatch(modelInput, /喜欢北星 P2/)
   assert.equal(events[2].data, checkpoint)
   assert.equal(events[3].data, stale)

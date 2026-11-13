@@ -127,6 +127,20 @@ function projectMemoryHistory(session, turn, step, keepId) {
   }
 }
 
+function historyWithoutMemory(session, messages = session?.deriveMessages?.() ?? []) {
+  let checkpoints
+  return messages.flatMap(message => {
+    if (message.source?.kind === MEMORY_SOURCE) return []
+    if (message.source?.kind !== COMPACT_CHECKPOINT) return [message]
+    checkpoints ??= new Map((session.surface?.nodes ?? []).map(seq => session.eventAt(seq))
+      .filter(event => event?.type === 'user/message' && event.data.source?.kind === COMPACT_CHECKPOINT)
+      .map(event => [event.data.id, event]))
+    const checkpoint = checkpoints.get(message.id)
+    const rebuilt = checkpoint && rebuildCheckpoint(session, checkpoint)
+    return rebuilt === null ? [] : [rebuilt ?? message]
+  })
+}
+
 function projectCompaction(service, session) {
   if (typeof service?.summarize !== 'function') return () => {}
   let projection = compactionProjections.get(service)
@@ -135,8 +149,10 @@ function projectCompaction(service, session) {
     const sessions = new Set()
     const summarize = async function (input, agent, signal) {
       if (!sessions.has(agent.session)) return original.call(this, input, agent, signal)
-      const messages = input.messages.filter(message => message.source?.kind !== MEMORY_SOURCE)
-      if (messages.length === input.messages.length) return original.call(this, input, agent, signal)
+      const messages = historyWithoutMemory(agent.session, input.messages)
+      if (messages.length === input.messages.length && messages.every((message, i) => message === input.messages[i])) {
+        return original.call(this, input, agent, signal)
+      }
       const { llmStreamCall, ...result } = await original.call(this, { ...input, messages }, agent, signal)
       return result
     }
@@ -968,7 +984,7 @@ class MemoryRuntime {
     const usage = session?.snapshotEvents?.().findLast(event => event.type === 'assistant/message')?.data.usage
     const { hard, reserve } = requestLimits
       ?? this.segmentRequestLimits(session, record, this.candidates.get(sessionId)?.model?.current?.())
-    const messages = session?.deriveMessages?.()
+    const messages = historyWithoutMemory(session)
     const header = session?.requestHeader?.()
     const surface = estimateMessages(messages) + estimateTokens(JSON.stringify(header?.tools ?? []))
     const previous = usage && Number.isFinite(usage.inputTokens)
@@ -1005,7 +1021,7 @@ class MemoryRuntime {
   }
 
   segmentSpace(agent, messages, persona, limits) {
-    const surface = agent.session.deriveMessages?.() ?? []
+    const surface = historyWithoutMemory(agent.session)
     const header = agent.session.requestHeader?.()
     const system = surface.some(message => message.role === 'system') ? 0
       : estimateTokens(persona) + estimateTokens(MAGIC_RULES)
@@ -1160,11 +1176,20 @@ class MemoryRuntime {
       return
     }
     const dispose = agent.ctx.effect(() => {
-      projectMemoryHistory(agent.session, 0, 0)
       const compaction = agent.ctx.inject?.(['compaction'], scope => {
         scope.effect(() => projectCompaction(scope.get('compaction'), agent.session))
       })
       const offStep = agent.ctx.on('agent/pre-step', (payload, next) => this.preStep(agent, payload, next))
+      const offRequest = agent.ctx.on('agent/request', async ({ turn, step, signal }, next) => {
+        const config = await next()
+        if (!signal?.aborted) {
+          // The host has logged step/start and has yet to derive the model input.
+          const active = this.turns.get(agent)
+          const keepId = active?.turn === turn ? 'memory:' + active.requestId : undefined
+          projectMemoryHistory(agent.session, turn, step, keepId)
+        }
+        return config
+      })
       const offEvent = !this.isTrusted(agent)
         ? agent.ctx.on('session/event', (subject, event) => this.sessionEvent(agent, subject, event)) : undefined
       // 人格占据宿主的 deployment persona prefix 槽位:本 agent 作用域的同名段
@@ -1175,6 +1200,7 @@ class MemoryRuntime {
       return () => {
         compaction?.dispose()
         offStep?.()
+        offRequest?.()
         offEvent?.()
         offPrompt?.()
         offTools?.()
@@ -1448,9 +1474,6 @@ class MemoryRuntime {
    */
   async preStep(agent, payload, next) {
     const sessionId = agent.session.id
-    const active = this.turns.get(agent)
-    const keepId = active?.turn === payload.turn ? 'memory:' + active.requestId : undefined
-    projectMemoryHistory(agent.session, payload.turn, payload.step, keepId)
     if (payload.messages?.some(message => message.source?.kind === RESEARCH_SOURCE)) {
       this.researchTurns.set(agent, payload.turn)
     } else if (payload.step === 1 && payload.messages?.some(message => message.source?.kind === PROACTIVE_SOURCE)) {
@@ -1812,23 +1835,19 @@ class MemoryRuntime {
   async renderBackground(sessionId, context, agent, currentInput, memoryTokenBudget) {
     const scopeId = sessionScopeId(sessionId)
     const index = this.client.state.injected[scopeId] ?? {}
-    const history = agent?.session?.deriveMessages?.() ?? []
+    const history = historyWithoutMemory(agent?.session)
     const seen = Object.fromEntries(Object.entries(index).filter(([key]) => key.startsWith('clock:')))
     return renderIncrement(context, seen, { scopeId,
       friend: this.bridge?.binding(sessionId)?.owner === false,
       currentInput,
       memoryTokenBudget,
-      representedText: history.filter(message => message.source?.kind !== MEMORY_SOURCE)
-        .map(messageText).join('\n') })
+      representedText: history.map(messageText).join('\n') })
   }
 
   // -- turn completion -------------------------------------------------
 
   sessionEvent(agent, subject, event) {
     if (subject !== agent.session && subject?.id !== agent.session?.id) return
-    if (event.type === 'turn/end' && this.attached.has(agent)) {
-      projectMemoryHistory(agent.session, event.data.turn, 1)
-    }
     if (this.turns.get(agent)?.proactive && !event.type.startsWith('compaction/')) return
     const active = this.turns.get(agent)
     const prepared = active?.prepared
