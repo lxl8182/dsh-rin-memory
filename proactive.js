@@ -6,6 +6,7 @@ import { collectMaterials, rankMaterials, fingerprint } from './discovery.js'
 
 export const PROACTIVE_SOURCE = 'companion-proactive'
 const day = 86400000
+const generationRetryDelays = [5 * 60000, 15 * 60000]
 
 /** Durable model-owned plans; discovery never owns a second sender. */
 export class ProactiveRuntime {
@@ -33,10 +34,15 @@ export class ProactiveRuntime {
     if (!key) return
     await this.save(state => {
       state.activity[key] = { ...state.activity[key], last_inbound: this.now() }
+      if (state.retries?.[key]) {
+        delete state.retries[key]
+        state.status[key] = { at: this.now() }
+      }
       state.session_bindings ??= {}
       state.session_bindings[input.sessionId] = key
       state.bindings = this.runtime.bridge.bindingRecords?.() ?? state.bindings
     })
+    this.arm()
   }
   async delivered(report) {
     const key = report.sessionKey ?? this.runtime.bridge?.binding?.(report.sessionId)?.sessionKey
@@ -281,6 +287,8 @@ export class ProactiveRuntime {
         if (!scope || !binding?.sessionKey || this.active.has(sessionId)
           || this.busy.has(sessionId) || runtime.client.isRetired(sessionId)) continue
         const key = binding.sessionKey, now = this.now(), plan = this.state.plans[key]
+        const retry = this.state.retries?.[key]
+        if (retry?.blocked || Date.parse(retry?.retry_at) > Date.parse(now)) continue
         if (Object.values(this.state.pending).some(row => row.binding === key)) continue
         if (friend && !this.allowed(key, now, { friend })) continue
         const planReady = plan?.status === 'scheduled' && Date.parse(plan.next_contact_at) <= Date.parse(now)
@@ -361,7 +369,7 @@ export class ProactiveRuntime {
         } catch (error) {
           finishOutput()
           this.active.delete(sessionId)
-          await this.retryAttempt(run, 'followup_rejected')
+          await this.retryAttempt(run, { kind: 'followup_rejected', error: { message: error.message } })
           throw error
         }
         break
@@ -374,9 +382,13 @@ export class ProactiveRuntime {
   async finish(session, event, run) {
     if (this.runtime.stopped) return
     if (event.data?.reason?.kind !== 'completed') {
-      await this.retryAttempt(run, event.data?.reason?.kind ?? 'generation_failed')
+      await this.retryAttempt(run, event.data?.reason ?? { kind: 'generation_failed' })
       return
     }
+    if (this.state.retries?.[run.binding]) await this.save(state => {
+      delete state.retries[run.binding]
+      state.status[run.binding] = { at: this.now() }
+    })
     const runtime = this.runtime
     const events = session.snapshotEvents?.() ?? []
     const start = events.findIndex(row => row.type === 'turn/start' && row.data?.turn === event.data.turn)
@@ -539,7 +551,6 @@ export class ProactiveRuntime {
     const previous = run.recovery
     if (!previous) return
     const key = run.binding
-    this.retryAt = Date.parse(this.now()) + 60000
     await this.save(state => {
       if (previous.due && state.plans[key]?.revision === run.plan_revision
         && state.plans[key]?.status === 'consumed') state.plans[key] = previous.plan
@@ -553,8 +564,18 @@ export class ProactiveRuntime {
       for (const [id, status] of previous.statuses) {
         if (state.candidates[id]?.status === 'considered') state.candidates[id].status = status
       }
-      state.status[key] = { error: reason, at: this.now(), retry_at: new Date(this.retryAt).toISOString() }
+      state.retries ??= {}
+      const attempts = (state.retries[key]?.attempts ?? 0) + 1
+      const delay = generationRetryDelays[attempts - 1]
+      const blocked = reason.kind === 'aborted' || delay === undefined
+      const retry = { attempts, blocked, at: this.now(),
+        error: reason.error?.code ?? reason.kind, message: reason.error?.message,
+        retry_at: blocked ? null : new Date(Date.parse(this.now()) + delay).toISOString() }
+      state.retries[key] = retry
+      state.status[key] = { ...retry }
     })
+    const retry = this.state.retries[key]
+    this.runtime.logger.warn?.(`[dsh-rin-memory] 主动生成${retry.blocked ? '暂停，等待新消息' : '延后至 ' + retry.retry_at} ${run.request_id} attempts=${retry.attempts} ${retry.error}`)
   }
   async forget(item) {
     const keys = new Set(item.source_keys ?? []), ids = new Set(item.memory_ids ?? [])
@@ -606,12 +627,18 @@ export class ProactiveRuntime {
       const agent = [...this.runtime.attached.keys()].find(agent =>
         this.runtime.bridge?.binding(agent.session.id)?.sessionKey === key)
       return Boolean(agent) && !this.busy.has(agent.session.id) && !this.active.has(agent.session.id)
+        && !this.state.retries?.[key]?.blocked
     }
+    const readyAt = (key, at) => Math.max(at, Date.parse(this.state.retries?.[key]?.retry_at) || 0)
     const opportunities = this.state.opportunities ?? {}
     const times = Object.values(this.state.plans).filter(plan => plan.status === 'scheduled' && live(plan.session_binding))
-      .map(plan => Math.max(Date.parse(plan.next_contact_at), Date.parse(opportunities[plan.session_binding]?.not_before ?? '') || 0))
+      .map(plan => readyAt(plan.session_binding,
+        Math.max(Date.parse(plan.next_contact_at), Date.parse(opportunities[plan.session_binding]?.not_before ?? '') || 0)))
     for (const [key, opportunity] of Object.entries(opportunities)) {
-      if (live(key) && this.state.plans[key]?.mode !== 'paused') times.push(Date.parse(opportunity.not_before))
+      if (live(key) && this.state.plans[key]?.mode !== 'paused') times.push(readyAt(key, Date.parse(opportunity.not_before)))
+    }
+    for (const [key, retry] of Object.entries(this.state.retries ?? {})) {
+      if (live(key) && retry.retry_at) times.push(Date.parse(retry.retry_at))
     }
     const validTimes = times.filter(Number.isFinite)
     if (!validTimes.length) return

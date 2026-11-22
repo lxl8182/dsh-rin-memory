@@ -85,7 +85,18 @@ function harness({ state = { proactiveOutputs: {} }, sessionId = 'qq-test', outp
     p.event(session, end)
     await p.tail
   }
-  return { runtime, context, agent, calls, sent, followups, outputs, barriers, complete,
+  async function fail(p, reason) {
+    turn++
+    const start = { type: 'turn/start', data: { turn } }
+    const end = { type: 'turn/end', data: { turn, reason } }
+    session.events.push(start)
+    p.event(session, start)
+    await p.prepare(agent, { turn })
+    session.events.push(end)
+    p.event(session, end)
+    await p.tail
+  }
+  return { runtime, context, agent, calls, sent, followups, outputs, barriers, complete, fail,
     advance: ms => { now = new Date(Date.parse(now) + ms).toISOString() }, invalidate: () => { valid = false } }
 }
 
@@ -258,10 +269,73 @@ test('a rejected followup restores the unaccepted opportunity for a later retry'
   assert.equal(p.state.initialized['private:42'], undefined)
   assert.ok(Object.values(p.state.candidates).every(row => row.status === 'pending'))
   h.agent.followup = followup
-  h.advance(61000)
+  h.advance(5 * 60000)
   await p.tick()
   assert.equal(h.followups.length, 1)
+  await h.complete(p, '[PASS]')
+  assert.equal(p.state.retries['private:42'], undefined)
   p.stop()
+})
+
+test('generation failures back off across restarts and stop after three attempts until real input', async () => {
+  const h = harness()
+  let p = new ProactiveRuntime(h.runtime)
+  const reason = { kind: 'error', error: { code: 'SERVER', message: '502 upstream unavailable' } }
+  await p.tick()
+  for (const [index, delay] of [5, 15, null].entries()) {
+    await h.fail(p, reason)
+    const retry = p.state.retries['private:42']
+    assert.equal(retry.attempts, index + 1)
+    assert.equal(retry.error, 'SERVER')
+    assert.equal(retry.message, reason.error.message)
+    assert.equal(h.barriers.size, 0)
+    assert.equal(retry.blocked, delay === null)
+    assert.equal(retry.retry_at, delay === null ? null
+      : new Date(Date.parse(h.runtime.client.now()) + delay * 60000).toISOString())
+    p.stop()
+    h.runtime.client.state = JSON.parse(JSON.stringify(h.runtime.client.state))
+    p = new ProactiveRuntime(h.runtime)
+    if (delay === null) {
+      h.advance(86400000)
+      await p.tick()
+      assert.equal(h.followups.length, 3)
+      assert.equal(p.timer, undefined)
+    } else {
+      h.advance(delay * 60000 - 1)
+      await p.tick()
+      assert.equal(h.followups.length, index + 1)
+      h.advance(1)
+      await p.tick()
+      assert.equal(h.followups.length, index + 2)
+    }
+  }
+  await p.observe({ ...h.runtime.bridge.binding(h.agent.session.id), sessionId: h.agent.session.id })
+  assert.equal(p.state.retries['private:42'], undefined)
+  h.advance(91 * 60000)
+  await p.tick()
+  assert.equal(h.followups.length, 4)
+  p.stop()
+})
+
+test('cancelling a scheduled generation preserves its plan and suppresses automatic retries after restart', async () => {
+  const h = harness(), p = new ProactiveRuntime(h.runtime)
+  const binding = h.runtime.bridge.binding(h.agent.session.id)
+  p.state.initialized[binding.sessionKey] = true
+  const plan = { revision: 1, session_binding: binding.sessionKey, mode: 'at', status: 'scheduled',
+    intent: '聊聊近况', next_contact_at: h.runtime.client.now() }
+  p.state.plans[binding.sessionKey] = plan
+  await p.tick()
+  await h.fail(p, { kind: 'aborted', reason: { kind: 'user' } })
+  assert.deepEqual(p.state.plans[binding.sessionKey], plan)
+  assert.equal(p.state.retries[binding.sessionKey].blocked, true)
+  assert.equal(h.barriers.size, 0)
+  p.stop()
+  const restored = new ProactiveRuntime(h.runtime)
+  h.advance(3600000)
+  await restored.tick()
+  assert.equal(h.followups.length, 1)
+  assert.equal(h.sent.length, 0)
+  restored.stop()
 })
 
 test('partial output resumes the same indices; new input does not cancel it and invalid sources stop unsent parts', async () => {
